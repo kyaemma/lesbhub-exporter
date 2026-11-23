@@ -179,45 +179,58 @@ local function addError(state, code)
     if #state.errors < 40 then table.insert(state.errors, code) end
 end
 
+local ASSET_PROPERTIES = {
+    Image = true, Texture = true, TextureId = true, TextureID = true,
+    MeshId = true, SoundId = true, AnimationId = true, HoverImage = true,
+}
+local TEXT_PROPERTIES = {Text = true, PlaceholderText = true}
+
 local function collectProperties(instance, cfg, state)
-    local class = instance.ClassName
+    local okClass, class = pcall(function() return instance.ClassName end)
+    if not okClass then
+        addError(state, "class_unavailable")
+        return {}
+    end
     local properties, wanted, unique = {}, {}, {}
-    local function include(list)
+    local function include(list, origin)
         for _, property in ipairs(list or {}) do
             if not unique[property] then
-                unique[property] = true
+                unique[property] = origin
                 table.insert(wanted, property)
             end
         end
     end
 
-    local okGui, isGui = pcall(function() return instance:IsA("GuiObject") end)
-    if cfg.guiProperties and okGui and isGui then include(GUI_COMMON) end
-    if cfg.guiProperties then include(GUI_CLASSES[class]) end
-    if cfg.worldProperties then
-        local okPart, isPart = pcall(function() return instance:IsA("BasePart") end)
-        if okPart and isPart then include(OTHER_CLASSES.BasePart) end
-        include(OTHER_CLASSES[class])
+    if cfg.guiProperties then
+        local okGui, isGui = pcall(function() return instance:IsA("GuiObject") end)
+        if okGui and isGui then include(GUI_COMMON, "gui") end
     end
-    if not cfg.assets then
-        local excluded = {Image = true, Texture = true, TextureId = true, TextureID = true,
-            MeshId = true, SoundId = true, AnimationId = true}
-        local filtered = {}
-        for _, p in ipairs(wanted) do
-            if not excluded[p] then table.insert(filtered, p) end
-        end
-        wanted = filtered
+    if cfg.guiProperties or cfg.guiTexts or cfg.assets or cfg.textboxValues then
+        include(GUI_CLASSES[class], "gui")
+    end
+    if cfg.worldProperties or cfg.assets or cfg.stringValues then
+        local okPart, isPart = pcall(function() return instance:IsA("BasePart") end)
+        if okPart and isPart then include(OTHER_CLASSES.BasePart, "world") end
+        include(OTHER_CLASSES[class], "world")
     end
 
     for _, property in ipairs(wanted) do
-        local skip = false
-        if property == "Text" and (class == "TextLabel" or class == "TextButton") and not cfg.guiTexts then
-            skip = true
+        local allowed
+        if class == "TextBox" and property == "Text" then
+            allowed = cfg.textboxValues
+        elseif TEXT_PROPERTIES[property] then
+            allowed = cfg.guiTexts
+        elseif ASSET_PROPERTIES[property] then
+            allowed = cfg.assets
+        elseif property == "Value" then
+            allowed = cfg.worldProperties and
+                (class ~= "StringValue" or (cfg.stringValues and not suspiciousName(instance.Name)))
+        elseif unique[property] == "gui" then
+            allowed = cfg.guiProperties
+        else
+            allowed = cfg.worldProperties
         end
-        if property == "PlaceholderText" and not cfg.guiTexts then skip = true end
-        if property == "Text" and class == "TextBox" and not cfg.textboxValues then skip = true end
-        if property == "Value" and class == "StringValue" and not cfg.stringValues then skip = true end
-        if not skip then
+        if allowed then
             local ok, value = pcall(function() return instance[property] end)
             if not ok then
                 addError(state, "property_unavailable:" .. class .. "." .. property)
@@ -233,7 +246,8 @@ end
 local function isForbidden(instance, root, state)
     if state.characters[instance] then return true end
     if root == "PlayerGui" then
-        local low = instance.Name:lower()
+        local okName, rawName = pcall(function() return instance.Name end)
+        local low = okName and tostring(rawName):lower() or ""
         if low == "chat" or low == "textchat" or low == "bubblechat" or low == "playerlist"
             or low == "lesbhub exporter" or low == "lesbhubexporter" then
             return true
@@ -517,6 +531,7 @@ function Exporter.capture(options, onProgress, control)
         end
     end
 
+    if state.errorCount > 0 then partial("read_or_write_errors") end
     local reasons = {}
     for reason in pairs(state.partialReasons) do table.insert(reasons, reason) end
     table.sort(reasons)
