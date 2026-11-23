@@ -5,7 +5,7 @@ local function loadEngine()
 -- Lesbhub Exporter V1 - client-side, read-only capture engine.
 -- No script source, remote invocation, executor introspection, or network upload.
 local Exporter = {}
-Exporter.VERSION = "0.5.2"
+Exporter.VERSION = "0.6.0"
 Exporter.SCHEMA_VERSION = 1
 Exporter.TARGETS = {
     "ReplicatedStorage", "ReplicatedFirst", "StarterGui", "PlayerGui",
@@ -48,6 +48,37 @@ local OTHER_CLASSES = {
     BasePart = {"Size", "Position", "CFrame", "Orientation", "Material", "Transparency", "Anchored", "CanCollide", "Color"},
     MeshPart = {"MeshId", "TextureID"},
     Model = {"WorldPivot", "PrimaryPart"},
+    Script = {"Enabled", "RunContext"},
+    LocalScript = {"Enabled"},
+    ModuleScript = {},
+    RemoteEvent = {},
+    RemoteFunction = {},
+    UnreliableRemoteEvent = {},
+    BindableEvent = {},
+    BindableFunction = {},
+    IntConstrainedValue = {"Value", "MinValue", "MaxValue"},
+    DoubleConstrainedValue = {"Value", "MinValue", "MaxValue"},
+    Vector3Value = {"Value"},
+    Color3Value = {"Value"},
+    CFrameValue = {"Value"},
+    BrickColorValue = {"Value"},
+    RayValue = {"Value"},
+    Motor6D = {"Part0", "Part1", "C0", "C1", "Transform", "Enabled"},
+    Weld = {"Part0", "Part1", "C0", "C1", "Enabled"},
+    ManualWeld = {"Part0", "Part1", "C0", "C1", "Enabled"},
+    WeldConstraint = {"Part0", "Part1", "Enabled"},
+    Attachment = {"CFrame", "Position", "Orientation", "Visible"},
+    Humanoid = {"Health", "MaxHealth", "WalkSpeed", "JumpPower", "HipHeight", "RigType", "AutoRotate"},
+    Camera = {"CFrame", "Focus", "FieldOfView", "CameraType", "CameraSubject"},
+    Lighting = {"ClockTime", "Brightness", "FogEnd", "FogStart", "Ambient", "OutdoorAmbient", "ExposureCompensation"},
+    PointLight = {"Enabled", "Color", "Brightness", "Range", "Shadows"},
+    SpotLight = {"Enabled", "Color", "Brightness", "Range", "Angle", "Shadows"},
+    SurfaceLight = {"Enabled", "Color", "Brightness", "Range", "Angle", "Shadows"},
+    BlurEffect = {"Enabled", "Size"},
+    BloomEffect = {"Enabled", "Intensity", "Size", "Threshold"},
+    ColorCorrectionEffect = {"Enabled", "TintColor", "Brightness", "Contrast", "Saturation"},
+    SunRaysEffect = {"Enabled", "Intensity", "Spread"},
+    Atmosphere = {"Density", "Offset", "Color", "Decay", "Glare", "Haze"},
     SpecialMesh = {"MeshId", "TextureId", "MeshType", "Scale"},
     Decal = {"Texture", "Transparency", "Color3"},
     Texture = {"Texture", "Transparency", "Color3"},
@@ -67,7 +98,7 @@ local OTHER_CLASSES = {
     IntValue = {"Value"},
     NumberValue = {"Value"},
     StringValue = {"Value"},
-    ObjectValue = {}, -- never traverse Value references
+    ObjectValue = {"Value"}, -- serialize as an inert reference, never traverse target children
     Configuration = {},
 }
 
@@ -82,6 +113,35 @@ local CATEGORIES = {
 local REMOTE_CLASSES = {
     RemoteEvent = true, RemoteFunction = true, UnreliableRemoteEvent = true,
     BindableEvent = true, BindableFunction = true,
+}
+-- These are documented class capabilities, not observations of live traffic.
+-- Do not imply that a particular game uses either possible network direction.
+local REMOTE_INFO = {
+    RemoteEvent = {
+        family = "remote", boundary = "client_server", style = "event",
+        asynchronous = true, requiresResponse = false,
+        delivery = "reliable_ordered",
+    },
+    UnreliableRemoteEvent = {
+        family = "remote", boundary = "client_server", style = "event",
+        asynchronous = true, requiresResponse = false,
+        delivery = "unreliable_unordered",
+    },
+    RemoteFunction = {
+        family = "remote", boundary = "client_server", style = "function",
+        asynchronous = false, requiresResponse = true,
+        delivery = "request_response",
+    },
+    BindableEvent = {
+        family = "bindable", boundary = "same_side", style = "event",
+        asynchronous = true, requiresResponse = false,
+        delivery = "local_event",
+    },
+    BindableFunction = {
+        family = "bindable", boundary = "same_side", style = "function",
+        asynchronous = false, requiresResponse = true,
+        delivery = "local_request_response",
+    },
 }
 local ASSET_CLASSES = {
     Sound = true, Animation = true, Decal = true, Texture = true,
@@ -209,6 +269,38 @@ local function readName(instance, cfg, state)
     return sanitizedString(value, cfg, state) or "[invalid]"
 end
 
+local function serializeReference(target, cfg, state)
+    -- Only expose references inside selected client-visible service trees.
+    -- Never copy a raw GetFullName() containing unrelated player paths.
+    local parts, seen = {}, {}
+    local current = target
+    local localPlayer = Players.LocalPlayer
+    local className
+    local okClass, class = pcall(function() return target.ClassName end)
+    if okClass then className = class end
+    while current and current ~= game do
+        if seen[current] or state.characters[current] then return nil end
+        seen[current] = true
+        local okParent, parent = pcall(function() return current.Parent end)
+        if not okParent then return nil end
+        local segment = readName(current, cfg, state):gsub("[./\\]", "_")
+        parts[#parts + 1] = segment
+        if parent == game then
+            if not cfg.targets[segment] then return nil end
+            local path = {}
+            for i = #parts, 1, -1 do path[#path + 1] = parts[i] end
+            return {kind = "InstanceRef", className = className, path = table.concat(path, "/")}
+        elseif parent == localPlayer then
+            if not cfg.targets[segment] then return nil end
+            local path = {}
+            for i = #parts, 1, -1 do path[#path + 1] = parts[i] end
+            return {kind = "InstanceRef", className = className, path = table.concat(path, "/")}
+        end
+        current = parent
+    end
+    return nil
+end
+
 local function serialize(value, cfg, state)
     local t = typeof(value)
     if t == "string" then return sanitizedString(value, cfg, state) end
@@ -239,8 +331,29 @@ local function serialize(value, cfg, state)
         return {min = {x = value.Min.X, y = value.Min.Y}, max = {x = value.Max.X, y = value.Max.Y}}
     end
     if t == "NumberRange" then return {min = value.Min, max = value.Max} end
+    if t == "NumberSequence" then
+        local points = {}
+        for _, p in ipairs(value.Keypoints) do
+            points[#points + 1] = {time = p.Time, value = p.Value, envelope = p.Envelope}
+        end
+        return points
+    end
+    if t == "ColorSequence" then
+        local points = {}
+        for _, p in ipairs(value.Keypoints) do
+            points[#points + 1] = {
+                time = p.Time,
+                color = {r = math.floor(p.Value.R * 255 + 0.5),
+                    g = math.floor(p.Value.G * 255 + 0.5),
+                    b = math.floor(p.Value.B * 255 + 0.5)},
+            }
+        end
+        return points
+    end
+    if t == "Instance" then return serializeReference(value, cfg, state) end
     if t == "BrickColor" then return value.Name end
-    -- Intentionally skip Instance references, connections, functions and unbounded tables.
+    -- Intentionally skip connections, functions and unbounded tables.
+    -- Instance references above are metadata only, never traversed.
     return nil
 end
 
@@ -267,6 +380,13 @@ local function collectProperties(instance, cfg, state)
         return {}
     end
     local properties, wanted, unique = {}, {}, {}
+    -- Archivable is inherited by every Roblox Instance. It provides useful
+    -- context for scripts and remotes that have few native readable fields.
+    local function includeMetadata()
+        wanted[#wanted + 1] = "Archivable"
+        unique.Archivable = "metadata"
+    end
+    includeMetadata()
     local function include(list, origin)
         for _, property in ipairs(list or {}) do
             if not unique[property] then
@@ -302,6 +422,13 @@ local function collectProperties(instance, cfg, state)
             allowed = cfg.guiTexts
         elseif ASSET_PROPERTIES[property] then
             allowed = cfg.assets
+        elseif property == "Archivable" then
+            allowed = true
+        elseif property == "Enabled" and
+            (class == "Script" or class == "LocalScript") then
+            allowed = true
+        elseif property == "RunContext" and class == "Script" then
+            allowed = true
         elseif property == "Value" then
             if class == "StringValue" then
                 -- Text values have their own privacy setting, independently
@@ -338,6 +465,59 @@ local function collectProperties(instance, cfg, state)
                         state.assetReferences = state.assetReferences + 1
                     end
                 end
+            end
+        end
+    end
+
+    -- A remote's callable methods and server-side handlers are not native
+    -- readable properties. Add only verified class-level capabilities, never
+    -- pretend to know arguments, listeners, invocations, or actual direction.
+    if REMOTE_CLASSES[class] then
+        local info = REMOTE_INFO[class]
+        properties.RemoteInfo = {
+            family = info.family,
+            boundary = info.boundary,
+            style = info.style,
+            asynchronous = info.asynchronous,
+            requiresResponse = info.requiresResponse,
+            delivery = info.delivery,
+            metadataSource = "roblox_class",
+            observedCalls = false,
+            parameterSchema = "unavailable",
+        }
+    end
+
+    -- Roblox attributes and tags are accessible on the client without any
+    -- script decompilation. Keep names/values sanitized and skip sensitive keys.
+    if cfg.includeAttributes then
+        local ok, attributes = pcall(function() return instance:GetAttributes() end)
+        if ok and type(attributes) == "table" then
+            local cleaned = {}
+            for key, value in pairs(attributes) do
+                if type(key) == "string" and not suspiciousName(key) then
+                    local safeKey = sanitizedString(key, cfg, state)
+                    local serialized = serialize(value, cfg, state)
+                    if safeKey and serialized ~= nil then cleaned[safeKey] = serialized end
+                elseif type(key) == "string" then
+                    state.redactions = state.redactions + 1
+                end
+            end
+            if next(cleaned) then properties.Attributes = cleaned end
+        end
+    end
+    if cfg.includeTags then
+        local ok, tags = pcall(function() return instance:GetTags() end)
+        if ok and type(tags) == "table" then
+            local cleaned = {}
+            for _, tag in ipairs(tags) do
+                if type(tag) == "string" and not suspiciousName(tag) then
+                    local name = sanitizedString(tag, cfg, state)
+                    if name then cleaned[#cleaned + 1] = name end
+                end
+            end
+            if #cleaned > 0 then
+                table.sort(cleaned)
+                properties.Tags = cleaned
             end
         end
     end
@@ -447,6 +627,8 @@ local function normalizedConfig(input)
     cfg.guiProperties = input.guiProperties ~= false
     cfg.worldProperties = input.worldProperties ~= false
     cfg.assets = input.assets ~= false
+    cfg.includeAttributes = input.includeAttributes ~= false
+    cfg.includeTags = input.includeTags ~= false
     cfg.textboxValues = input.textboxValues == true
     cfg.stringValues = input.stringValues == true
     cfg.twoPassGui = input.twoPassGui == true
@@ -931,7 +1113,9 @@ function Exporter.capture(options, onProgress, control)
             settings = {format = cfg.format, chunkSize = cfg.chunkSize,
                 continuous = true, continuousInterval = cfg.continuousInterval,
                 captureMode = "continuous", targets = cfg.targets,
-                organizedOutput = cfg.organizedOutput},
+                organizedOutput = cfg.organizedOutput,
+                includeAttributes = cfg.includeAttributes,
+                includeTags = cfg.includeTags},
         }
         local ok, encoded = pcall(function() return HttpService:JSONEncode(payload) end)
         if not ok or not pcall(writefile, base .. "/manifest.json", encoded) then
@@ -1204,7 +1388,8 @@ function Exporter.capture(options, onProgress, control)
         settings = {
             format = cfg.format, targets = cfg.targets, guiTexts = cfg.guiTexts,
             guiProperties = cfg.guiProperties, worldProperties = cfg.worldProperties,
-            assets = cfg.assets, textboxValues = cfg.textboxValues,
+            assets = cfg.assets, includeAttributes = cfg.includeAttributes,
+            includeTags = cfg.includeTags, textboxValues = cfg.textboxValues,
             stringValues = cfg.stringValues, twoPassGui = cfg.twoPassGui,
             guiPasses = cfg.guiPasses, secondPassDelay = cfg.secondPassDelay,
             chunkSize = cfg.chunkSize, yieldEvery = cfg.yieldEvery,
@@ -1227,6 +1412,8 @@ function Exporter.capture(options, onProgress, control)
             "GUI snapshots are not merged; lazy menus must be opened by the operator.",
             "Categorized output places data in category/service subfolders while preserving original paths.",
             "The scripts category contains metadata only, not script sources.",
+            "Native Archivable/Enabled/RunContext, attributes, tags and safe client-visible Instance references are collected when readable.",
+            "RemoteInfo contains documented class capabilities only; not intercepted traffic, handlers, argument schemas or observed call direction.",
             "Continuous mode: pass 1 is a full snapshot; later records have operations add/update/remove.",
             "Workspace changes are captured through client DescendantAdded/DescendantRemoving events.",
             "GUI properties are refreshed periodically and unchanged records are not rewritten.",
