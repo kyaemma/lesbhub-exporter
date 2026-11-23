@@ -58,3 +58,10 @@ Potassium live results (modded Criminality variant, 2026-11-23): GUI-only captur
 
 For each run record: executor version, client FPS before/during/after, duration, number of visited/written objects, number of files, manifest status, and validation output. Avoid including player names in test logs.
 
+
+| E52 | Remote object from ReplicatedStorage | `RemoteInfo` class metadata, no fabricated invocation count or raw arguments |
+| E53 | Script metadata | `Archivable` and supported `Enabled`/RunContext flags, no Source |
+| E54 | Constrained/typed values | `IntConstrainedValue` includes numeric Value/MinValue/MaxValue where readable |
+| E55 | Attributes and tags | client-visible GetAttributes/GetTags values collected, sensitive keys filtered |
+| E56 | Optional Cobalt plugin | OFF by default, explicit start/stop, only coarse type signatures and counts |
+| E57 | Cobalt integration unload | interceptor cleanup occurs; no replay, blocking, raw arguments or uploads |

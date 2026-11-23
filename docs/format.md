@@ -134,3 +134,43 @@ Operations are `add`, `update`, or `remove`. For removals `properties` is an emp
 During an active capture `manifest.json` is periodically overwritten with `status=recording`. Pressing **Stop & Save** writes the final manifest with `status=stopped`, `endedReason=user_stopped`, `settings.captureMode=continuous`, and counters `monitorCycles`, `deltaRecords`, `added`, `updated`, `removed`. Cancel instead yields `status=cancelled`.
 
 Continuous mode does not infer a final object count, does not bypass Roblox streaming, and does not invoke game remotes or trigger UI actions. No specific game or menu names are assumed.
+
+
+## Expanded client metadata (v0.6.0)
+
+The allowlist includes typed/constrained values, basic camera/humanoid/joint/attachment/light properties, `Archivable` on Instances, and client-readable script flags when supported. Values are serialized by type, with `Instance` values represented as inert references such as:
+
+```json
+{"Value": {"kind": "InstanceRef", "className": "Part", "path": "Workspace/Map/Piece"}}
+```
+
+Links are only emitted when their targets have a safely identifiable path inside selected client-visible services. They do not dereference arbitrary references or bypass replication. Unavailable or unreadable fields remain absent, never fabricated.
+
+Attributes and tags are included when available as `properties.Attributes` and `properties.Tags`, with potentially sensitive names/values filtered.
+
+### Passive remote inventory
+
+A `RemoteEvent` record may contain:
+
+```json
+{
+  "properties": {
+    "Archivable": true,
+    "RemoteInfo": {
+      "family": "remote",
+      "boundary": "client_server",
+      "style": "event",
+      "asynchronous": true,
+      "requiresResponse": false,
+      "delivery": "reliable_ordered",
+      "metadataSource": "roblox_class",
+      "observedCalls": false,
+      "parameterSchema": "unavailable"
+    }
+  }
+}
+```
+
+`RemoteInfo` describes the Roblox **class**, not the game's actual usage, server-side handlers, call direction, or arguments. The main exporter **never invokes or spies on remotes**.
+
+For optional call **observations** rather than class capabilities, see [Cobalt integration](cobalt-integration.md). Its local JSON summary is a separate dataset and intentionally stores *only* call counts, observed direction and argument types; it cannot reconstruct payload values.

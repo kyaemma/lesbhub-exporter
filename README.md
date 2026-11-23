@@ -6,7 +6,7 @@ The UI is built with our [Lesbhub WindUI fork](https://github.com/kyaemma/lesbhu
 
 ## Status
 
-**v0.5.2: organized export folders by type and Roblox service.** Earlier Potassium captures have demonstrated large exports; the most recent screenshots show 223.7K objects, 44.7K asset references and a 60.3-second run (partial status, reason not yet confirmed from its manifest). This UI update is validated with Luau and Python automated tests, including a simulated floating journal. A visual Potassium retest is still needed.
+**v0.6.0: expanded client metadata plus optional Cobalt remote observation.** Earlier Potassium captures have demonstrated large exports; the most recent screenshots show 223.7K objects, 44.7K asset references and a 60.3-second run (partial status, reason not yet confirmed from its manifest). This UI update is validated with Luau and Python automated tests, including a simulated floating journal. A visual Potassium retest is still needed.
 
 ## Run from a supported Roblox client environment
 
@@ -22,7 +22,9 @@ For offline/manual distribution, use `dist/lesbhub-exporter.lua` (but the UI sti
 
 - **Targets:** ReplicatedStorage, ReplicatedFirst, StarterGui, PlayerGui, StarterPlayer, PlayerScripts, StarterPack, Workspace, Lighting, SoundService, Teams.
 - **Targets:** multi-select searchable dropdown, with **all services selected by default**, plus one-click presets for all, GUI-only and game structures.
-- **Properties:** names, classes, parent/child paths, depth, GUI labels/text/buttons, TextBox placeholders, visual styles, asset IDs, selected world properties and basic values.
+- **Properties:** names, classes, hierarchy, GUI labels/layout, geometry, assets, constrained/typed values, Instance references when safely addressable, and additional joint/camera/light metadata.
+- **Scripts and remotes:** script `Archivable`/`Enabled`/`RunContext` when readable; remotes include `Archivable` and a static `RemoteInfo` class-capability descriptor, plus attributes/tags where available. This is not decompiled code or intercepted traffic.
+- **Optional Cobalt plugin:** original, separately installed [passive remote observer](docs/cobalt-integration.md) using [upio/Cobalt](https://gitlab.com/upio/cobalt)'s documented plugin API. It records outgoing/incoming call counts and top-level argument **types**, not raw argument values.
 - **Formats:** chunked JSON, JSONL or CSV; one **manifest.json** per capture, with settings, counts, status, errors, partial reasons, and category totals.
 - **Organized datasets:** by default, records are grouped by type (`gui`, `scripts`, `remotes`, `world`, `values`, `assets`, `structures`, `other`) and by Roblox service. UI scripts live under `scripts/PlayerGui/`, while UI widgets go under `gui/PlayerGui/`. Full original paths and parent relationships are preserved. The legacy flat layout remains selectable in Dataset.
 - **One-time full export + GUI:** one action for structures and guided GUI snapshots (4 passes by default in Max information). Open and close any UI elements during the guided passes; no game-specific menu names or automation.
@@ -58,7 +60,7 @@ LesbhubExporter/<category>/<game>/<variant>/<capture-id>/
   structures/ReplicatedStorage/p1-0001.json
 ```
 
-Each object is stored in **one** type category; `path` and `parentPath` still reference the original Roblox hierarchy, not the filesystem. Not every category exists in every game. The `scripts` folder contains only script object metadata and **does not export script sources**. The `assets` folder contains asset-bearing instances, not downloaded image/sound binaries. The `manifest.json` contains the per-category and per-service record/file counts.
+Each object is stored in **one** type category; `path` and `parentPath` still reference the original Roblox hierarchy, not the filesystem. Not every category exists in every game. The `scripts` folder contains only script object metadata and **does not export script sources**. The `assets` folder contains asset-bearing instances, not downloaded image/sound binaries. The `manifest.json` contains the per-category and per-service record/file counts. On v0.6+, most script and remote records also contain safe metadata instead of an empty `properties` object.
 
 This layout works with full scans, guided GUI passes and continuous `add/update/remove` deltas. To validate old or new exports: `python scripts/validate_export.py <run-directory>`.
 
@@ -68,7 +70,7 @@ In **Settings → Language / Langue**, choose **Français** to switch the entire
 
 ### Capture modes and presets
 
-All target services are selected initially. **Full export + GUI** always includes a local PlayerGui and StarterGui snapshot, plus additional guided passes if enabled. The other button **Capture GUI now** is strictly optional.
+All target services are selected initially. **Full export + GUI** always includes a local PlayerGui and StarterGui snapshot, plus additional guided passes if enabled. Attributes and tags are enabled in all presets, with dedicated Advanced toggles. The other button **Capture GUI now** is strictly optional.
 
 | Preset | Content | GUI snapshots | Work per step |
 |---|---|---|---|
