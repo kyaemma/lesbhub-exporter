@@ -22,8 +22,10 @@ Potassium live results (modded Criminality variant, 2026-11-23): GUI-only captur
 | E16 | Live WindUI progress | changing class/path, counters, files written and elapsed time visible without significant FPS spikes |
 | E17 | Manual GUI-only capture | separate snapshot of currently opened STORE or SKINS via Capture GUI now |
 
-For each run record: executor version, client FPS before/during/after, duration, number of visited/written objects, number of files, manifest status, and validation output. Avoid including player names in test logs.
 | E18 | More than 100,000 discovered objects | progress range expands automatically; no object budget or artificial completion |
 | E19 | Faulty UTF-8 property while scanning | record is recovered, other objects still exported, manifest `partial` explains modification |
 | E20 | Map geometry JSON | CFrame/Position/Size collected from reachable parts; no voxel/binary data claimed |
 | E21 | Native place export supported or unsupported | disabled until explicit operator opt-in; unsupported executors return clear message |
+
+For each run record: executor version, client FPS before/during/after, duration, number of visited/written objects, number of files, manifest status, and validation output. Avoid including player names in test logs.
+
