@@ -232,3 +232,49 @@ local savedNative, nativePath = Exporter.savePlace()
 assert(savedNative and nativePath == "mock-executor-place.rbxl")
 print("Luau smoke test OK: adaptive capture, JSON recovery and optional native save")
 
+-- Universal continuous mode: a dynamically created menu appears after the
+-- initial snapshot. Explicit Stop & Save triggers one final delta sweep.
+local monitorControl = {cancelled = false, stopRequested = false}
+local monitorStarted = false
+local genericMenu = instance("InventoryPanel", "ScreenGui", nil, {
+    instance("ConfirmAction", "TextButton", {Text = "Continue"}),
+})
+local monitored, monitorError = Exporter.capture({
+    label = "GenericMenuFixture",
+    targets = {PlayerGui = true},
+    continuous = true, continuousInterval = 1,
+    textboxValues = false, twoPassGui = true, chunkSize = 25,
+}, function(info)
+    if info.stage == "monitoring_start" then
+        monitorStarted = true
+        table.insert(gui._children, genericMenu)
+        monitorControl.stopRequested = true
+    end
+end, monitorControl)
+assert(monitored, monitorError)
+assert(monitorStarted, "Monitoring stage was never entered")
+assert(monitored.manifest.status == "stopped", "User stop must not be a cancellation")
+assert(monitored.manifest.endedReason == "user_stopped")
+assert(monitored.manifest.settings.continuous == true)
+assert(monitored.manifest.settings.captureMode == "continuous")
+assert(monitored.manifest.stats.deltaRecords >= 2,
+    "New generic GUI should be captured as delta records")
+assert(monitored.manifest.services.PlayerGui.passes >= 2)
+local foundMenu = false
+local foundButton = false
+for filename, chunk in pairs(writes) do
+    if filename:find(monitored.folder, 1, true) and filename:find("-p2-", 1, true) then
+        for _, record in ipairs(chunk.records or {}) do
+            if record.name == "InventoryPanel" and record.operation == "add" then
+                foundMenu = true
+            elseif record.name == "ConfirmAction" and record.operation == "add" then
+                foundButton = record.properties.Text == "Continue"
+            end
+        end
+    end
+end
+assert(foundMenu and foundButton, "Final GUI delta missing newly opened menu")
+assert(not monitorControl.cancelled, "Stop & Save must not trigger Cancel")
+print("Luau continuous smoke OK: generic menu deltas, no hardcoded names, stopped manifest")
+
+
