@@ -207,6 +207,10 @@ assert(window.options.User and window.options.User.Enabled == false
 assert(window.tabs.Home, "Default locale must be English")
 assert(window.tabs.Home:find("Button", "Full export + GUI"), "Home quick export absent")
 assert(window.tabs.Home:find("Button", "Open activity window"), "Home log shortcut absent")
+local dataset = window.tabs.Dataset
+local layoutPicker = dataset:find("Dropdown", "File organization")
+assert(layoutPicker and layoutPicker.value == "Categorized folders")
+
 local activityWindow
 for _, obj in ipairs(fakeScreen.Children) do
     if obj.Name == "LesbhubExporterActivity" then activityWindow = obj end
@@ -236,6 +240,9 @@ window.lastDialog.Buttons[2].Callback()
 local max = engine.calls[1]
 assert(max and max.targets.PlayerGui and max.targets.StarterGui)
 assert(max.twoPassGui and max.guiPasses == 4)
+assert(max.organizedOutput == true, "Folder organization should be enabled by default")
+layoutPicker:Set("Flat (legacy)")
+
 assert(max.textboxValues and max.stringValues)
 
 modePicker:Set("Fast")
@@ -243,6 +250,8 @@ fullBtn.config.Callback()
 window.lastDialog.Buttons[2].Callback()
 local fast = engine.calls[2]
 assert(fast.guiTexts and fast.assets and fast.twoPassGui and fast.guiPasses == 2)
+assert(fast.organizedOutput == false, "Legacy layout selector did not update the config")
+
 assert(not fast.worldProperties and fast.textboxValues and fast.stringValues)
 
 targets:find("Button", "GUI only").config.Callback()
