@@ -101,7 +101,7 @@ local function observe(info, instance, direction)
             incoming = 0, outgoing = 0,
             firstSequence = 0, lastSequence = 0,
             firstSeenUtc = "", lastSeenUtc = "",
-            signatures = {},
+            signatures = {}, signatureCount = 0, additionalSignatures = 0,
         }
         records[id] = record
     else
@@ -122,10 +122,12 @@ local function observe(info, instance, direction)
     local previous = record.signatures[signature]
     if previous then
         previous.count = previous.count + 1
-    elseif #record.signatures < 48 then
-        -- Dictionary length is not # on a Luau table, so count explicitly.
+    elseif record.signatureCount < 48 then
         record.signatures[signature] = {count = 1, direction = direction,
             argumentCount = count, argumentTypes = types}
+        record.signatureCount = record.signatureCount + 1
+    else
+        record.additionalSignatures = record.additionalSignatures + 1
     end
 end
 
@@ -172,6 +174,7 @@ local function writeSummary()
             firstSequence = record.firstSequence, lastSequence = record.lastSequence,
             firstSeenUtc = record.firstSeenUtc, lastSeenUtc = record.lastSeenUtc,
             signatures = signatures,
+            unclassifiedSignatureOccurrences = record.additionalSignatures,
         }
     end
     table.sort(list, function(a, b) return a.id < b.id end)
