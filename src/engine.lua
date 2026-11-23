@@ -214,6 +214,11 @@ local function collectProperties(instance, cfg, state)
         include(OTHER_CLASSES[class], "world")
     end
 
+    local sensitiveStringValue = false
+    if class == "StringValue" then
+        local okName, name = pcall(function() return instance.Name end)
+        sensitiveStringValue = not okName or suspiciousName(name) ~= nil
+    end
     for _, property in ipairs(wanted) do
         local allowed
         if class == "TextBox" and property == "Text" then
@@ -224,7 +229,7 @@ local function collectProperties(instance, cfg, state)
             allowed = cfg.assets
         elseif property == "Value" then
             allowed = cfg.worldProperties and
-                (class ~= "StringValue" or (cfg.stringValues and not suspiciousName(instance.Name)))
+                (class ~= "StringValue" or (cfg.stringValues and not sensitiveStringValue))
         elseif unique[property] == "gui" then
             allowed = cfg.guiProperties
         else
@@ -476,7 +481,7 @@ function Exporter.capture(options, onProgress, control)
                         if not isForbidden(child, serviceName, state) then
                             local segment = readName(child, cfg, state)
                             local safeSegment = segment:gsub("[./\\]", "_")
-                            local key = safeSegment .. ":" .. child.ClassName
+                            local key = safeSegment -- disambiguate same-name siblings, regardless of ClassName
                             counts[key] = (counts[key] or 0) + 1
                             if enqueued < cfg.maxNodes then
                                 local suffix = counts[key] > 1 and ("~" .. counts[key]) or ""
