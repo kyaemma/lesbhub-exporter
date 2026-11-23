@@ -105,6 +105,43 @@ class ExportFormatTests(unittest.TestCase):
             manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
             self.assertEqual(validate_folder(folder), [])
 
+    def test_continuous_stopped_manifest_with_delta(self):
+        with tempfile.TemporaryDirectory() as directory:
+            folder = Path(directory)
+            self.write_dataset(folder, "json")
+            initial = json.loads((folder / "manifest.json").read_text(encoding="utf-8"))
+            initial["status"] = "stopped"
+            initial["settings"]["captureMode"] = "continuous"
+            initial["settings"]["continuous"] = True
+            initial["endedReason"] = "user_stopped"
+            record = dict(self.RECORD)
+            record["path"] = "PlayerGui/Menu/Start"
+            record["parentPath"] = "PlayerGui/Menu"
+            record["name"] = "Start"
+            record["operation"] = "add"
+            record["observedAtUtc"] = "2026-11-23T15:00:00Z"
+            delta = folder / "PlayerGui-p2-0001.json"
+            delta.write_text(json.dumps({
+                "schemaVersion": 1, "service": "PlayerGui",
+                "pass": 2, "records": [record],
+            }), encoding="utf-8")
+            initial["stats"]["written"] += 1
+            initial["stats"]["files"] += 1
+            initial["stats"]["bytes"] += delta.stat().st_size
+            initial["stats"]["deltaRecords"] = 1
+            initial["services"]["PlayerGui"]["records"] += 1
+            initial["services"]["PlayerGui"]["files"] += 1
+            initial["services"]["PlayerGui"]["passes"] = 2
+            (folder / "manifest.json").write_text(json.dumps(initial), encoding="utf-8")
+            self.assertEqual(validate_folder(folder), [])
+
+    def test_no_game_specific_gui_prompts(self):
+        ui = (ROOT / "src" / "ui.lua").read_text(encoding="utf-8")
+        for specific_menu in ("STORE", "SKINS", "ToggleStoreUI", "ToggleSkinsUI"):
+            self.assertNotIn(specific_menu, ui)
+        self.assertIn("continuous", ui)
+        self.assertIn("stopRequested", ui)
+
     def test_missing_manifest(self):
         with tempfile.TemporaryDirectory() as directory:
             errors = validate_folder(Path(directory))
