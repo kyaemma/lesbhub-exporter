@@ -6,15 +6,18 @@ local LANGUAGE_FILE = "LesbhubExporter/language.txt"
 
 local PRESETS = {
     max = {guiTexts = true, guiProperties = true, worldProperties = true, assets = true,
-        textboxValues = true, stringValues = true, twoPassGui = true,
+        textboxValues = true, stringValues = true,
+        includeAttributes = true, includeTags = true, twoPassGui = true,
         guiPasses = 4, secondPassDelay = 7, continuousInterval = 3,
         yieldEvery = 45, chunkSize = 200},
     smart = {guiTexts = true, guiProperties = true, worldProperties = true, assets = true,
-        textboxValues = true, stringValues = true, twoPassGui = true,
+        textboxValues = true, stringValues = true,
+        includeAttributes = true, includeTags = true, twoPassGui = true,
         guiPasses = 3, secondPassDelay = 6, continuousInterval = 4,
         yieldEvery = 80, chunkSize = 300},
     fast = {guiTexts = true, guiProperties = false, worldProperties = false, assets = true,
-        textboxValues = true, stringValues = true, twoPassGui = true,
+        textboxValues = true, stringValues = true,
+        includeAttributes = true, includeTags = true, twoPassGui = true,
         guiPasses = 2, secondPassDelay = 3, continuousInterval = 6,
         yieldEvery = 140, chunkSize = 500},
 }
@@ -118,6 +121,10 @@ local WORDS = {
     world_props_desc = {"Geometry, transforms, materials and values.", "Géométrie, positions, matériaux et valeurs."},
     assets = {"Asset references", "Références d'assets"},
     assets_desc = {"IDs only, not downloaded media.", "Identifiants uniquement, pas de médias téléchargés."},
+    attributes = {"Instance attributes", "Attributs des objets"},
+    attributes_desc = {"Read client-visible GetAttributes() values.", "Récupère les valeurs GetAttributes() accessibles au client."},
+    tags = {"CollectionService tags", "Tags CollectionService"},
+    tags_desc = {"Read available GetTags() labels.", "Récupère les étiquettes GetTags() disponibles."},
     textbox = {"TextBox.Text", "TextBox.Text"},
     textbox_desc = {"Potential user input. Private dataset only.", "Saisies utilisateur possibles. Dataset privé uniquement."},
     stringvalue = {"StringValue.Value", "StringValue.Value"},
@@ -486,6 +493,8 @@ function UI.open(Engine, restore)
         for _, service in ipairs(Engine.TARGETS) do config.targets[service] = true end
     end
     if config.organizedOutput == nil then config.organizedOutput = true end
+    if config.includeAttributes == nil then config.includeAttributes = true end
+    if config.includeTags == nil then config.includeTags = true end
     local presetKey = restore.preset or "max"
     local running, control, destroyed, nativeBusy = false, nil, false, false
     local runningMode = nil
@@ -680,6 +689,8 @@ function UI.open(Engine, restore)
     addToggle("guiProperties", "gui_props", "gui_props_desc")
     addToggle("worldProperties", "world_props", "world_props_desc")
     addToggle("assets", "assets", "assets_desc")
+    addToggle("includeAttributes", "attributes", "attributes_desc")
+    addToggle("includeTags", "tags", "tags_desc")
     addToggle("textboxValues", "textbox", "textbox_desc")
     addToggle("stringValues", "stringvalue", "stringvalue_desc")
     addToggle("twoPassGui", "gui_passes_enabled", "gui_passes_desc")
