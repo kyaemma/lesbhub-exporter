@@ -5,7 +5,7 @@ local function loadEngine()
 -- Lesbhub Exporter V1 - client-side, read-only capture engine.
 -- No script source, remote invocation, executor introspection, or network upload.
 local Exporter = {}
-Exporter.VERSION = "0.5.1"
+Exporter.VERSION = "0.5.2"
 Exporter.SCHEMA_VERSION = 1
 Exporter.TARGETS = {
     "ReplicatedStorage", "ReplicatedFirst", "StarterGui", "PlayerGui",
@@ -70,6 +70,55 @@ local OTHER_CLASSES = {
     ObjectValue = {}, -- never traverse Value references
     Configuration = {},
 }
+
+-- The file layout is independent of the original Roblox hierarchy.
+-- Every record keeps its original path and parentPath for tree reconstruction.
+-- A script nested inside PlayerGui is stored under scripts/PlayerGui/, never
+-- mixed with rendered GUI objects or mistaken for its source code.
+local CATEGORIES = {
+    scripts = true, gui = true, remotes = true, values = true,
+    world = true, assets = true, structures = true, other = true,
+}
+local REMOTE_CLASSES = {
+    RemoteEvent = true, RemoteFunction = true, UnreliableRemoteEvent = true,
+    BindableEvent = true, BindableFunction = true,
+}
+local ASSET_CLASSES = {
+    Sound = true, Animation = true, Decal = true, Texture = true,
+    SurfaceAppearance = true, SpecialMesh = true, ParticleEmitter = true,
+    Beam = true, Trail = true, Shirt = true, ShirtGraphic = true,
+    Pants = true, Sky = true, PointLight = true, SpotLight = true,
+    SurfaceLight = true, Fire = true, Smoke = true, Sparkles = true,
+}
+local STRUCTURE_CLASSES = {
+    Folder = true, Configuration = true, Model = true,
+    ReplicatedStorage = true, ReplicatedFirst = true,
+    StarterGui = true, PlayerGui = true, StarterPlayer = true,
+    PlayerScripts = true, StarterPack = true, Teams = true,
+}
+local function categoryFor(instance, service, class)
+    if class == "Script" or class == "LocalScript" or class == "ModuleScript" then
+        return "scripts"
+    end
+    if REMOTE_CLASSES[class] then return "remotes" end
+    if class:match("Value$") or class:match("ConstrainedValue$") then return "values" end
+    if class == "ScreenGui" or class == "BillboardGui" or class == "SurfaceGui"
+        or class == "VideoFrame" or GUI_CLASSES[class] then
+        return "gui"
+    end
+    if instance then
+        local ok, isGui = pcall(function()
+            return instance:IsA("GuiObject") or instance:IsA("GuiBase2d")
+                or instance:IsA("UIComponent") or instance:IsA("UIConstraint")
+        end)
+        if ok and isGui then return "gui" end
+    end
+    if ASSET_CLASSES[class] then return "assets" end
+    if service == "Workspace" or service == "Lighting" then return "world" end
+    if service == "SoundService" then return "assets" end
+    if STRUCTURE_CLASSES[class] then return "structures" end
+    return "other"
+end
 
 local function clamp(value, lo, hi, default)
     local n = tonumber(value)
@@ -348,7 +397,7 @@ local function csvEscape(value)
     return '"' .. s:gsub('"', '""') .. '"'
 end
 
-local function encodeChunk(records, format, service, pass)
+local function encodeChunk(records, format, service, pass, category)
     if format == "jsonl" then
         local lines = {}
         for _, record in ipairs(records) do
@@ -371,7 +420,7 @@ local function encodeChunk(records, format, service, pass)
     end
     local encoded = HttpService:JSONEncode({
         schemaVersion = Exporter.SCHEMA_VERSION,
-        service = service, pass = pass, records = records,
+        service = service, pass = pass, category = category, records = records,
     })
     return (encoded:gsub('"properties":%[%]', '"properties":{}'))
 end
@@ -383,6 +432,7 @@ local function normalizedConfig(input)
     cfg.category = tostring(input.category or "Other"):sub(1, 80)
     cfg.variant = tostring(input.variant or "Default"):sub(1, 80)
     cfg.format = ({json = true, jsonl = true, csv = true})[input.format] and input.format or "json"
+    cfg.organizedOutput = input.organizedOutput ~= false
     cfg.targets = {}
     for _, service in ipairs(Exporter.TARGETS) do
         if type(input.targets) == "table" and input.targets[service] == true then
@@ -479,7 +529,7 @@ function Exporter.capture(options, onProgress, control)
         pending = 0, assetReferences = 0, currentPath = "", currentClass = "",
         currentService = "", currentPass = 1, startedAt = os.clock(),
         errors = {}, errorCount = 0, partialReasons = {}, services = {},
-        classes = {}, cancelled = false, stopped = false,
+        classes = {}, categories = {}, cancelled = false, stopped = false,
         stopRequested = false, monitoring = false, monitorCycles = 0,
         deltaRecords = 0, added = 0, updated = 0, removed = 0,
     }
@@ -500,7 +550,12 @@ function Exporter.capture(options, onProgress, control)
     end
 
     local chunkIndexes = {}
+    local createdDataFolders = {}
     local serviceSnapshots = {}
+    local function targetDirectory(category, service)
+        if not cfg.organizedOutput then return base end
+        return base .. "/" .. category .. "/" .. service
+    end
 
     local function asciiFallback(value)
         -- Preserve UTF-8 bytes reversibly when an executor's JSON encoder
@@ -545,26 +600,25 @@ function Exporter.capture(options, onProgress, control)
         return fixed
     end
 
-    local function flush(records, serviceName, pass)
+    local function flush(records, serviceName, pass, category)
         if #records == 0 then return true end
-        local okEncode, encoded = pcall(encodeChunk, records, cfg.format, serviceName, pass)
+        category = (CATEGORIES[category] and category) or "other"
+        local okEncode, encoded = pcall(encodeChunk, records, cfg.format, serviceName, pass, category)
         if not okEncode and #records > 1 then
-            -- A single invalid record must not kill all following services.
-            -- Binary split also helps with executor-specific chunk size limits.
+            -- Keep all valid records if one item has an invalid JSON value.
             local half = math.floor(#records / 2)
             local left, right = {}, {}
             for i = 1, half do left[#left + 1] = records[i] end
             for i = half + 1, #records do right[#right + 1] = records[i] end
-            local okLeft = flush(left, serviceName, pass)
-            local okRight = okLeft and flush(right, serviceName, pass)
-            return okLeft and okRight
+            return flush(left, serviceName, pass, category)
+                and flush(right, serviceName, pass, category)
         end
         if not okEncode then
             local fixed = repairRecord(records[1])
-            okEncode, encoded = pcall(encodeChunk, {fixed}, cfg.format, serviceName, pass)
+            okEncode, encoded = pcall(encodeChunk, {fixed}, cfg.format, serviceName, pass, category)
             if not okEncode then
                 fixed.properties = {}
-                okEncode, encoded = pcall(encodeChunk, {fixed}, cfg.format, serviceName, pass)
+                okEncode, encoded = pcall(encodeChunk, {fixed}, cfg.format, serviceName, pass, category)
             end
             if not okEncode then
                 addError(state, "record_encode_failed:" .. serviceName)
@@ -575,10 +629,29 @@ function Exporter.capture(options, onProgress, control)
             addError(state, "record_serialization_recovered:" .. serviceName)
         end
 
-        local key = serviceName .. "/p" .. tostring(pass)
+        local directory = targetDirectory(category, serviceName)
+        if not createdDataFolders[directory] then
+            if not createFolders(directory) then
+                addError(state, "directory_create_failed:" .. serviceName .. ":" .. category)
+                partial("write_error")
+                return false
+            end
+            createdDataFolders[directory] = true
+        end
+
+        -- Flat mode has one index namespace per service/pass to avoid
+        -- category A overwriting category B's p1-0001 chunk.
+        local key = cfg.organizedOutput
+            and (category .. "/" .. serviceName .. "/p" .. tostring(pass))
+            or (serviceName .. "/p" .. tostring(pass))
         local part = (chunkIndexes[key] or 0) + 1
         local ext = cfg.format == "json" and "json" or cfg.format
-        local filename = string.format("%s/%s-p%d-%04d.%s", base, serviceName, pass, part, ext)
+        local filename
+        if cfg.organizedOutput then
+            filename = string.format("%s/p%d-%04d.%s", directory, pass, part, ext)
+        else
+            filename = string.format("%s/%s-p%d-%04d.%s", base, serviceName, pass, part, ext)
+        end
         if not pcall(writefile, filename, encoded) then
             addError(state, "write_failed:" .. serviceName)
             partial("write_error")
@@ -590,7 +663,48 @@ function Exporter.capture(options, onProgress, control)
         state.written = state.written + #records
         state.services[serviceName].records = state.services[serviceName].records + #records
         state.services[serviceName].files = state.services[serviceName].files + 1
+        local summary = state.categories[category]
+        if not summary then
+            summary = {records = 0, files = 0, services = {}}
+            state.categories[category] = summary
+        end
+        summary.records = summary.records + #records
+        summary.files = summary.files + 1
+        local byService = summary.services[serviceName]
+        if not byService then
+            byService = {records = 0, files = 0}
+            summary.services[serviceName] = byService
+        end
+        byService.records = byService.records + #records
+        byService.files = byService.files + 1
         notify(onProgress, "file_written", state, serviceName)
+        return true
+    end
+
+    -- Category-aware buffering bounds memory without dropping references to
+    -- object parents that happen to be stored in a different folder.
+    local function bufferRecord(buckets, record, serviceName, pass, category)
+        category = (CATEGORIES[category] and category) or "other"
+        record.category = category
+        local bucket = buckets[category]
+        if not bucket then
+            bucket = {}
+            buckets[category] = bucket
+        end
+        bucket[#bucket + 1] = record
+        if #bucket >= cfg.chunkSize then
+            if not flush(bucket, serviceName, pass, category) then return false end
+            buckets[category] = {}
+        end
+        return true
+    end
+
+    local function flushBuckets(buckets, serviceName, pass)
+        for category, bucket in pairs(buckets) do
+            if #bucket > 0 and not flush(bucket, serviceName, pass, category) then
+                return false
+            end
+        end
         return true
     end
 
@@ -617,7 +731,7 @@ function Exporter.capture(options, onProgress, control)
             instance = root, depth = 0, path = serviceName, parent = "",
             entered = false,
         }}
-        local records, steps = {}, 0
+        local buckets, steps = {}, 0
         local seen = setmetatable({}, {__mode = "k"})
         state.currentService = serviceName
         state.currentPass = pass
@@ -647,40 +761,37 @@ function Exporter.capture(options, onProgress, control)
                     state.currentPath = frame.path
                     state.currentClass = class
                     local properties = collectProperties(obj, cfg, state)
+                    local category = categoryFor(obj, serviceName, class)
                     local record = {
                         name = name, className = class, path = frame.path,
                         parentPath = frame.parent, depth = frame.depth, properties = properties,
+                        category = category,
                     }
+                    local include = true
                     if deltaMode or baselineMode then
                         local signature = recordFingerprint(record)
                         currentSnapshot[record.path] = {
                             signature = signature, name = name, className = class,
-                            path = record.path, parentPath = record.parentPath, depth = record.depth,
+                            path = record.path, parentPath = record.parentPath,
+                            depth = record.depth, category = category,
                         }
                         local previous = previousSnapshot[record.path]
                         if deltaMode then
-                            if not previous or previous.signature ~= signature then
+                            include = not previous or previous.signature ~= signature
+                            if include then
                                 record.operation = previous and "update" or "add"
                                 record.observedAtUtc = os.date("!%Y-%m-%dT%H:%M:%SZ")
-                                table.insert(records, record)
                                 state.deltaRecords = state.deltaRecords + 1
                                 if previous then state.updated = state.updated + 1
                                 else state.added = state.added + 1 end
                             end
-                        else
-                            table.insert(records, record)
                         end
-                    else
-                        table.insert(records, record)
+                    end
+                    if include and not bufferRecord(buckets, record, serviceName, pass, category) then
+                        state.stopped = true
+                        break
                     end
                     state.classes[class] = (state.classes[class] or 0) + 1
-                    if #records >= cfg.chunkSize then
-                        if not flush(records, serviceName, pass) then
-                            state.stopped = true
-                            break
-                        end
-                        records = {}
-                    end
 
                     local okChildren, children = pcall(function() return obj:GetChildren() end)
                     if not okChildren then
@@ -721,35 +832,33 @@ function Exporter.capture(options, onProgress, control)
             end
         end
 
-        -- Tombstones make removals explicit: an analyzer can reconstruct
-        -- GUI state without comparing full repeated snapshots.
+        -- Tombstones preserve the same category as the original instance,
+        -- even when that instance no longer exists on the client.
         if deltaMode and not state.stopped then
             local inspected = 0
-            for path, old in pairs(previousSnapshot) do
+            for path, previous in pairs(previousSnapshot) do
                 if stopCheck() then break end
                 if currentSnapshot[path] == nil then
-                    table.insert(records, {
+                    local tombstone = {
                         operation = "remove", observedAtUtc = os.date("!%Y-%m-%dT%H:%M:%SZ"),
-                        name = old.name, className = old.className,
-                        path = old.path, parentPath = old.parentPath,
-                        depth = old.depth, properties = {},
-                    })
+                        name = previous.name, className = previous.className,
+                        path = previous.path, parentPath = previous.parentPath,
+                        depth = previous.depth, properties = {},
+                    }
+                    if not bufferRecord(buckets, tombstone, serviceName, pass,
+                        previous.category or categoryFor(nil, serviceName, previous.className)) then
+                        state.stopped = true; break
+                    end
                     state.deltaRecords = state.deltaRecords + 1
                     state.removed = state.removed + 1
-                    if #records >= cfg.chunkSize then
-                        if not flush(records, serviceName, pass) then
-                            state.stopped = true; break
-                        end
-                        records = {}
-                    end
                 end
                 inspected = inspected + 1
                 if inspected % cfg.yieldEvery == 0 then task.wait() end
             end
         end
-        -- Stop preserves all records already buffered.
-        if #records > 0 and (not state.stopped or state.cancelled or state.stopRequested) then
-            if not flush(records, serviceName, pass) then state.stopped = true end
+        -- A manual stop preserves records already inspected in every category.
+        if not state.stopped or state.cancelled or state.stopRequested then
+            if not flushBuckets(buckets, serviceName, pass) then state.stopped = true end
         end
         if currentSnapshot and not state.stopped then
             serviceSnapshots[serviceName] = currentSnapshot
@@ -811,11 +920,15 @@ function Exporter.capture(options, onProgress, control)
                 added = state.added, updated = state.updated, removed = state.removed,
             },
             services = state.services,
+            categories = state.categories,
+            layout = {version = cfg.organizedOutput and 2 or 1,
+                id = cfg.organizedOutput and "categorized" or "flat"},
             errors = state.errors,
             partialReasons = {},
             settings = {format = cfg.format, chunkSize = cfg.chunkSize,
                 continuous = true, continuousInterval = cfg.continuousInterval,
-                captureMode = "continuous", targets = cfg.targets},
+                captureMode = "continuous", targets = cfg.targets,
+                organizedOutput = cfg.organizedOutput},
         }
         local ok, encoded = pcall(function() return HttpService:JSONEncode(payload) end)
         if not ok or not pcall(writefile, base .. "/manifest.json", encoded) then
@@ -953,15 +1066,15 @@ function Exporter.capture(options, onProgress, control)
                 if serviceStats then
                     serviceStats.visited = serviceStats.visited + 1
                     serviceStats.passes = math.max(serviceStats.passes, 2)
-                    local bucket = perService[event.service]
-                    if not bucket then bucket = {}; perService[event.service] = bucket end
-                    bucket[#bucket + 1] = record
-                    if #bucket >= cfg.chunkSize then
-                        if not flush(bucket, event.service, 2) then
-                            state.stopped = true
-                            break
-                        end
-                        perService[event.service] = {}
+                    local buckets = perService[event.service]
+                    if not buckets then
+                        buckets = {}
+                        perService[event.service] = buckets
+                    end
+                    if not bufferRecord(buckets, record, event.service, 2,
+                        categoryFor(event.instance, event.service, class)) then
+                        state.stopped = true
+                        break
                     end
                 end
             end
@@ -976,8 +1089,8 @@ function Exporter.capture(options, onProgress, control)
             events = {}; eventHead = 1; eventTail = 0
         end
         -- Flush small batches too: a menu may be opened only briefly.
-        for service, bucket in pairs(perService) do
-            if #bucket > 0 and not flush(bucket, service, 2) then state.stopped = true end
+        for service, buckets in pairs(perService) do
+            if not flushBuckets(buckets, service, 2) then state.stopped = true end
         end
     end
 
@@ -1081,6 +1194,9 @@ function Exporter.capture(options, onProgress, control)
             added = state.added, updated = state.updated, removed = state.removed,
         },
         services = state.services,
+        categories = state.categories,
+        layout = {version = cfg.organizedOutput and 2 or 1,
+            id = cfg.organizedOutput and "categorized" or "flat"},
         errors = state.errors,
         settings = {
             format = cfg.format, targets = cfg.targets, guiTexts = cfg.guiTexts,
@@ -1089,6 +1205,7 @@ function Exporter.capture(options, onProgress, control)
             stringValues = cfg.stringValues, twoPassGui = cfg.twoPassGui,
             guiPasses = cfg.guiPasses, secondPassDelay = cfg.secondPassDelay,
             chunkSize = cfg.chunkSize, yieldEvery = cfg.yieldEvery,
+            organizedOutput = cfg.organizedOutput,
             continuous = cfg.continuous, continuousInterval = cfg.continuousInterval,
             captureMode = cfg.continuous and "continuous" or "exhaustive",
         },
@@ -1105,6 +1222,8 @@ function Exporter.capture(options, onProgress, control)
             "StreamingEnabled can result in missing Workspace descendants.",
             "No global node, depth, total byte, or string-length limit is applied.",
             "GUI snapshots are not merged; lazy menus must be opened by the operator.",
+            "Categorized output places data in category/service subfolders while preserving original paths.",
+            "The scripts category contains metadata only, not script sources.",
             "Continuous mode: pass 1 is a full snapshot; later records have operations add/update/remove.",
             "Workspace changes are captured through client DescendantAdded/DescendantRemoving events.",
             "GUI properties are refreshed periodically and unchanged records are not rewritten.",
@@ -1216,6 +1335,11 @@ local WORDS = {
     category = {"Category", "Catégorie"},
     variant = {"Variant", "Variante"},
     format = {"Format", "Format"},
+    output_layout = {"File organization", "Organisation des fichiers"},
+    layout_categorized = {"Categorized folders", "Dossiers classés par type"},
+    layout_flat = {"Flat (legacy)", "À plat (ancien format)"},
+    layout_desc = {"Groups instances by type and Roblox service. Script records are metadata only.",
+        "Classe les objets par type puis par service Roblox. Les scripts restent des métadonnées, sans code source."},
     target_intro = {"Roblox services", "Services Roblox"},
     target_desc = {"All available targets are selected by default. Search and select several in one menu.",
         "Toutes les cibles sont sélectionnées par défaut. Recherche et sélectionne plusieurs services dans un seul menu."},
@@ -1616,9 +1740,11 @@ function UI.open(Engine, restore)
     if not restore.config then
         config.label, config.category, config.variant = "Unlabeled", "Other", "Default"
         config.format = "json"
+        config.organizedOutput = true
         config.targets = {}
         for _, service in ipairs(Engine.TARGETS) do config.targets[service] = true end
     end
+    if config.organizedOutput == nil then config.organizedOutput = true end
     local presetKey = restore.preset or "max"
     local running, control, destroyed, nativeBusy = false, nil, false, false
     local runningMode = nil
@@ -1700,6 +1826,14 @@ function UI.open(Engine, restore)
         Callback = function(value)
             local name = optionName(value):lower()
             if name == "json" or name == "jsonl" or name == "csv" then config.format = name end
+        end,
+    })
+    dataset:Dropdown({
+        Title = t("output_layout"), Desc = t("layout_desc"),
+        Values = {t("layout_categorized"), t("layout_flat")},
+        Value = config.organizedOutput ~= false and t("layout_categorized") or t("layout_flat"),
+        Callback = function(value)
+            config.organizedOutput = optionName(value) ~= t("layout_flat")
         end,
     })
 
