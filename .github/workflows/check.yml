@@ -34,6 +34,11 @@ jobs:
           /tmp/luau/luau-compile src/ui.lua > /dev/null
           /tmp/luau/luau-compile dist/lesbhub-exporter.lua > /dev/null
           /tmp/luau/luau-compile tests/mock_capture.luau > /dev/null
+      - name: Compile public WindUI fork bundle
+        run: |
+          curl --fail --silent --show-error --location https://raw.githubusercontent.com/kyaemma/lesbhub-ui/main/dist/main.lua --output /tmp/lesbhub-windui.lua
+          grep -q "Lesbhub WindUI fork: fit dialog action buttons" /tmp/lesbhub-windui.lua
+          /tmp/luau/luau-compile /tmp/lesbhub-windui.lua > /dev/null
       - name: Run mock client smoke test
         run: |
           python scripts/build_mock.py /tmp/lesbhub-smoke.luau
