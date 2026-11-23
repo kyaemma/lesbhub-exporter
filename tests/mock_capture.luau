@@ -32,7 +32,8 @@ local box = instance("UserInput", "TextBox", {
 local chat = instance("Chat", "ScreenGui", nil, {
     instance("Message", "TextLabel", {Text = "do not capture"}),
 })
-local gui = instance("PlayerGui", "PlayerGui", nil, {label, box, chat, image})
+local clientCode = instance("MenuController", "LocalScript")
+local gui = instance("PlayerGui", "PlayerGui", nil, {label, box, chat, image, clientCode})
 local world = instance("Workspace", "Workspace", {StreamingEnabled = true}, {
     instance("Map", "Folder"), otherCharacter,
 })
@@ -40,6 +41,7 @@ local storage = instance("ReplicatedStorage", "ReplicatedStorage", nil, {
     instance("Events", "Folder", nil, {
         instance("GameStarted", "RemoteEvent"),
     }),
+    instance("AssetSound", "Sound", {SoundId = "rbxassetid://7654321"}),
     instance("APIKey", "StringValue", {Value = "short-secret"}),
     instance("BuildLabel", "StringValue", {Value = "modded-crim"}),
 })
@@ -91,7 +93,23 @@ assert(capture, err)
 local m = capture.manifest
 assert(m.status == "partial", "Workspace streaming must mark partial")
 assert(m.stats.written > 0, "No records exported")
-assert(m.stats.files == 3, "Expected one chunk per service")
+assert(m.stats.files >= 6, "Expected separate category/service chunks")
+assert(m.layout and m.layout.id == "categorized" and m.layout.version == 2)
+assert(m.settings.organizedOutput == true)
+assert(m.categories.scripts and m.categories.scripts.services.PlayerGui,
+    "A UI LocalScript must be classified under scripts/PlayerGui")
+assert(m.categories.gui and m.categories.gui.services.PlayerGui)
+assert(m.categories.remotes and m.categories.remotes.services.ReplicatedStorage)
+assert(m.categories.assets and m.categories.assets.services.ReplicatedStorage)
+assert(m.categories.world and m.categories.world.services.Workspace)
+local categoryFiles = 0
+local categoryRecords = 0
+for category, info in pairs(m.categories) do
+    categoryFiles = categoryFiles + info.files
+    categoryRecords = categoryRecords + info.records
+end
+assert(categoryFiles == m.stats.files and categoryRecords == m.stats.written,
+    "Category totals must reconcile with manifest")
 assert(m.services.PlayerGui.passes == 1)
 assert(m.privacy.excludesScriptSource == true)
 local reasonFound = false
@@ -102,12 +120,15 @@ assert(reasonFound, "Streaming limitation was not disclosed")
 
 local seenLabel, seenBox, seenChat, seenCharacter, seenSecret = false, false, false, false, false
 local seenAsset = false
+local seenGuiScript = false
+local sawNestedGui = false
 for path, value in pairs(writes) do
-    if path:find("-p1-", 1, true) then
+    if (path:find("-p1-", 1, true) or path:find("/p1-", 1, true)) or path:find("/p1-", 1, true) then
         for _, record in ipairs(value.records or {}) do
             if record.name == "Title" then
                 seenLabel = true
                 assert(record.properties.Text == "Welcome [player]", "Player alias not masked")
+                sawNestedGui = path:find("/gui/PlayerGui/p1-", 1, true) ~= nil
             elseif record.name == "UserInput" then
                 seenBox = true
                 assert(record.properties.Text == nil, "TextBox input leaked")
@@ -115,6 +136,10 @@ for path, value in pairs(writes) do
             elseif record.name == "Logo" then
                 seenAsset = true
                 assert(record.properties.Image == "rbxassetid://1234567")
+            elseif record.name == "MenuController" then
+                seenGuiScript = path:find("/scripts/PlayerGui/p1-", 1, true) ~= nil
+                assert(record.className == "LocalScript" and record.properties.Source == nil)
+                assert(record.path == "PlayerGui/MenuController")
             elseif record.name == "Chat" then
                 seenChat = true
             elseif record.name == "Alice" then
@@ -128,6 +153,7 @@ for path, value in pairs(writes) do
     end
 end
 assert(seenLabel and seenBox and seenSecret and seenAsset)
+assert(seenGuiScript and sawNestedGui, "GUI metadata and GUI scripts not split correctly")
 assert(m.stats.assetReferences >= 1, "Asset references not counted")
 assert(not seenChat and not seenCharacter, "Chat or other players' character included")
 local stringOnly, stringOnlyError = Exporter.capture({
@@ -137,7 +163,7 @@ local stringOnly, stringOnlyError = Exporter.capture({
 assert(stringOnly, stringOnlyError)
 local foundBuildLabel = false
 for filename, chunk in pairs(writes) do
-    if filename:find(stringOnly.folder, 1, true) and filename:find("-p1-", 1, true) then
+    if filename:find(stringOnly.folder, 1, true) and (filename:find("-p1-", 1, true) or filename:find("/p1-", 1, true)) then
         for _, record in ipairs(chunk.records or {}) do
             if record.name == "BuildLabel" then
                 foundBuildLabel = true
@@ -212,7 +238,7 @@ end
 assert(foundRecovery, "Encoding recovery not reported")
 local savedBadText = false
 for path, value in pairs(writes) do
-    if path:find(repaired.folder, 1, true) and path:find("-p1-", 1, true) then
+    if path:find(repaired.folder, 1, true) and (path:find("-p1-", 1, true) or path:find("/p1-", 1, true)) then
         for _, record in ipairs(value.records or {}) do
             if record.name == "BadText" then
                 savedBadText = true
@@ -272,7 +298,7 @@ local foundButton = false
 local foundUpdated = false
 local foundRemoved = false
 for filename, chunk in pairs(writes) do
-    if filename:find(monitored.folder, 1, true) and filename:find("-p2-", 1, true) then
+    if filename:find(monitored.folder, 1, true) and (filename:find("-p2-", 1, true) or filename:find("/p2-", 1, true)) then
         for _, record in ipairs(chunk.records or {}) do
             if record.name == "InventoryPanel" and record.operation == "add" then
                 foundMenu = true
@@ -290,5 +316,28 @@ assert(foundMenu and foundButton and foundUpdated and foundRemoved,
     "Final delta must capture added, updated and removed GUI objects")
 assert(not monitorControl.cancelled, "Stop & Save must not trigger Cancel")
 print("Luau continuous smoke OK: generic menu deltas, no hardcoded names, stopped manifest")
+
+-- Legacy flat mode must preserve its original naming and must not overwrite
+-- chunks from different categories in the same service/pass.
+local flat, flatError = Exporter.capture({
+    label = "LegacyFixture", organizedOutput = false,
+    targets = {PlayerGui = true, ReplicatedStorage = true},
+    chunkSize = 25, yieldEvery = 20,
+})
+assert(flat, flatError)
+assert(flat.manifest.layout.id == "flat")
+assert(flat.manifest.settings.organizedOutput == false)
+local flatFiles = 0
+for filename in pairs(writes) do
+    if filename:find(flat.folder, 1, true)
+        and filename:match("/%w+%-p1%-%d+%.json$") then
+        flatFiles = flatFiles + 1
+        assert(not filename:find("/gui/", 1, true) and not filename:find("/scripts/", 1, true))
+    end
+end
+assert(flatFiles == flat.manifest.stats.files)
+assert(flat.manifest.stats.written == flat.manifest.stats.visited)
+print("Luau categorized layout OK: UI scripts, categorized files, flat compatibility")
+
 
 
