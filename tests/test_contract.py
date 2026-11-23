@@ -161,7 +161,7 @@ class ExportFormatTests(unittest.TestCase):
                 "records": [record],
             }), encoding="utf-8")
         elif format_name == "jsonl":
-            file.write_text(json.dumps(record) + "\\n", encoding="utf-8")
+            file.write_text(json.dumps(record) + "\n", encoding="utf-8")
         else:
             with file.open("w", encoding="utf-8", newline="") as stream:
                 writer = csv.writer(stream)
