@@ -1,10 +1,16 @@
--- Lesbhub Exporter V1 UI. Requires the public Lesbhub WindUI fork.
+-- Lesbhub Exporter V1.1 UI. Uses our public WindUI fork, not the upstream library.
 local UI = {}
 local WINDUI_URL = "https://raw.githubusercontent.com/kyaemma/lesbhub-ui/main/dist/main.lua"
 
 local function optionName(value)
     if type(value) == "table" then return tostring(value.Title or value.Value or "") end
     return tostring(value)
+end
+
+local function shortPath(path)
+    local value = tostring(path or "")
+    if #value > 128 then return "..." .. value:sub(-125) end
+    return value
 end
 
 function UI.open(Engine)
@@ -18,17 +24,14 @@ function UI.open(Engine)
 
     local config = {
         label = "Unlabeled", category = "Other", variant = "Default",
-        format = "json",
-        targets = {
-            ReplicatedStorage = true, ReplicatedFirst = true,
-            StarterGui = true, PlayerGui = true, StarterPlayer = true,
-        },
+        format = "json", targets = {},
         guiTexts = true, guiProperties = true, worldProperties = true,
         assets = true, textboxValues = false, stringValues = false,
-        twoPassGui = false, secondPassDelay = 3,
-        maxNodes = 15000, maxDepth = 28, yieldEvery = 80,
-        chunkSize = 200, maxString = 256, maxBytes = 16 * 1024 * 1024,
+        twoPassGui = true, guiPasses = 3, secondPassDelay = 6,
+        yieldEvery = 60, chunkSize = 200,
     }
+    -- Exhaustive is the default. A target is omitted only by explicit selection.
+    for _, service in ipairs(Engine.TARGETS) do config.targets[service] = true end
     local running, control = false, nil
 
     local Window = windui:CreateWindow({
@@ -45,8 +48,8 @@ function UI.open(Engine)
     local capture = Window:Tab({Title = "Capture", Icon = "scan"})
 
     setup:Paragraph({
-        Title = "Local client snapshot",
-        Desc = "Read-only. Output stays on your device. No script Source, remote invocation or uploads. Check exports before sharing.",
+        Title = "Complete client-visible snapshot",
+        Desc = "No object count, depth, size or text-length cap. Output remains local. Roblox server-only data is not accessible.",
     })
     setup:Input({
         Title = "Game label", Value = config.label,
@@ -65,7 +68,7 @@ function UI.open(Engine)
     })
     setup:Dropdown({
         Title = "Export format",
-        Desc = "All formats are chunked; manifest.json is always created.",
+        Desc = "JSON / JSONL / CSV are split into small files. Always includes manifest.json.",
         Values = {"JSON", "JSONL", "CSV"}, Value = "JSON",
         Callback = function(value)
             local choice = optionName(value):lower()
@@ -76,17 +79,16 @@ function UI.open(Engine)
     })
 
     targets:Paragraph({
-        Title = "Choose only what you need",
-        Desc = "PlayerGui captures local GUI only. Players, CoreGui, private server identifiers and other players' characters are excluded.",
+        Title = "Full client selected by default",
+        Desc = "Deselect unwanted services. PlayerGui refers to your local UI. Other players' characters, chat and CoreGui are excluded.",
     })
     local toggles = {}
     for _, service in ipairs(Engine.TARGETS) do
         toggles[service] = targets:Toggle({
-            Title = service, Value = config.targets[service] == true,
+            Title = service, Value = true,
             Callback = function(value) config.targets[service] = value == true end,
         })
     end
-
     local function setPreset(which)
         local presets = {
             gui = {StarterGui = true, PlayerGui = true},
@@ -101,90 +103,94 @@ function UI.open(Engine)
             if toggles[service] then toggles[service]:Set(enabled, false) end
         end
     end
-    targets:Button({Title = "Preset: GUI only", Callback = function() setPreset("gui") end})
-    targets:Button({Title = "Preset: Structures only", Callback = function() setPreset("structures") end})
-    targets:Button({Title = "Preset: Full client", Callback = function() setPreset("full") end})
+    targets:Button({Title = "Full client (default)", Callback = function() setPreset("full") end})
+    targets:Button({Title = "GUI only", Callback = function() setPreset("gui") end})
+    targets:Button({Title = "Structures only", Callback = function() setPreset("structures") end})
 
+    options:Paragraph({
+        Title = "Exhaustive does not mean unsafe",
+        Desc = "There are no global export caps. Chunk size and yield cadence protect frame time without limiting what is collected.",
+    })
     options:Toggle({
-        Title = "GUI text", Value = config.guiTexts,
-        Desc = "TextLabel/TextButton text and TextBox placeholders.",
+        Title = "GUI texts and placeholders", Value = true,
         Callback = function(value) config.guiTexts = value end,
     })
     options:Toggle({
-        Title = "GUI layout and colors", Value = config.guiProperties,
+        Title = "GUI layout and colors", Value = true,
         Callback = function(value) config.guiProperties = value end,
     })
     options:Toggle({
-        Title = "World/config properties", Value = config.worldProperties,
+        Title = "World/config properties", Value = true,
         Callback = function(value) config.worldProperties = value end,
     })
     options:Toggle({
-        Title = "Asset IDs", Value = config.assets,
+        Title = "Asset IDs (not binary downloads)", Value = true,
         Callback = function(value) config.assets = value end,
     })
     options:Toggle({
         Title = "TextBox.Text (privacy risk)", Value = false,
-        Desc = "Disabled by default: may contain text typed by users.",
+        Desc = "Normally avoid: may contain player-entered messages and codes.",
         Callback = function(value) config.textboxValues = value end,
     })
     options:Toggle({
         Title = "StringValue.Value (privacy risk)", Value = false,
-        Desc = "Disabled by default: may contain keys, identifiers or player data.",
+        Desc = "Normally avoid: may contain identifiers or private values.",
         Callback = function(value) config.stringValues = value end,
     })
     options:Toggle({
-        Title = "Second GUI pass", Value = false,
-        Desc = "A single delayed extra snapshot of PlayerGui/StarterGui. No background loop.",
+        Title = "Guided dynamic-menu snapshots", Value = true,
+        Desc = "Open game menus yourself between captures; no simulated purchases or remote calls.",
         Callback = function(value) config.twoPassGui = value end,
     })
     options:Slider({
-        Title = "Extra pass delay (seconds)", Step = 1,
-        Value = {Min = 1, Max = 10, Default = 3},
+        Title = "Total GUI snapshots", Step = 1,
+        Value = {Min = 2, Max = 8, Default = 3},
+        Callback = function(value) config.guiPasses = value end,
+    })
+    options:Slider({
+        Title = "Seconds between GUI snapshots", Step = 1,
+        Value = {Min = 2, Max = 25, Default = 6},
         Callback = function(value) config.secondPassDelay = value end,
     })
     options:Slider({
-        Title = "Max objects", Step = 500,
-        Value = {Min = 500, Max = 50000, Default = 15000},
-        Callback = function(value) config.maxNodes = value end,
-    })
-    options:Slider({
-        Title = "Max depth", Step = 1,
-        Value = {Min = 2, Max = 80, Default = 28},
-        Callback = function(value) config.maxDepth = value end,
-    })
-    options:Slider({
-        Title = "Objects per yield", Step = 5,
-        Value = {Min = 15, Max = 500, Default = 80},
+        Title = "Objects per yield", Step = 10,
+        Value = {Min = 10, Max = 250, Default = 60},
         Callback = function(value) config.yieldEvery = value end,
     })
     options:Slider({
-        Title = "Objects per file", Step = 25,
+        Title = "Records per file (not export limit)", Step = 25,
         Value = {Min = 25, Max = 800, Default = 200},
         Callback = function(value) config.chunkSize = value end,
     })
-    options:Dropdown({
-        Title = "Total size limit",
-        Values = {"8 MiB", "16 MiB", "32 MiB", "64 MiB"},
-        Value = "16 MiB",
-        Callback = function(value)
-            local size = tonumber(optionName(value):match("%d+"))
-            if size then config.maxBytes = size * 1024 * 1024 end
-        end,
-    })
 
     capture:Paragraph({
-        Title = "Start a bounded capture",
-        Desc = "Every service is exported in small files. A manifest records partial captures, errors and limits. No detector in V1.",
+        Title = "Exhaustive scan, with live feedback",
+        Desc = "Every accessible object is visited. Records are written incrementally; the progress ratio represents nodes discovered so far, not a fixed total.",
     })
     local progress = nil
-    local okProgress, result = pcall(function()
+    local okProgress, progressResult = pcall(function()
         return capture:ProgressBar({
-            Title = "Objects visited (budget)",
-            Value = {Min = 0, Max = 50000, Default = 0},
-            DisplayMode = "Value", Animate = false,
+            Title = "Visited / discovered so far",
+            Value = {Min = 0, Max = 1, Default = 0},
+            DisplayMode = "Fraction", Animate = false,
         })
     end)
-    if okProgress then progress = result end
+    if okProgress then progress = progressResult end
+
+    local status = capture:Paragraph({
+        Title = "Idle",
+        Desc = "Choose Start full export, or open a menu and use Capture GUI now.",
+    })
+    local log = nil
+    local okLog, logResult = pcall(function()
+        return capture:Code({
+            Title = "Live capture feed",
+            Code = "Ready. Waiting for a capture...",
+            Height = 170,
+            CanCopied = true,
+        })
+    end)
+    if okLog then log = logResult end
 
     local function alert(title, content)
         local ok = pcall(function()
@@ -192,66 +198,148 @@ function UI.open(Engine)
         end)
         if not ok then warn("[Lesbhub Exporter] " .. title .. ": " .. tostring(content)) end
     end
+
+    local function startCapture(guiOnly)
+        if running then alert("Already capturing", "Cancel the existing capture first.") return end
+        if type(writefile) ~= "function" or type(makefolder) ~= "function" then
+            alert("Missing file APIs", "writefile and makefolder are required.")
+            return
+        end
+        running = true
+        control = {cancelled = false}
+        local runControl = control
+        local runConfig = {}
+        for key, value in pairs(config) do
+            if key == "targets" then
+                runConfig.targets = {}
+                for service, enabled in pairs(value) do runConfig.targets[service] = enabled end
+            else
+                runConfig[key] = value
+            end
+        end
+        if guiOnly then
+            runConfig.targets = {PlayerGui = true, StarterGui = true}
+            runConfig.twoPassGui = false
+        end
+
+        local events, lastRender = {}, -math.huge
+        local function event(value)
+            events[#events + 1] = value
+            if #events > 14 then table.remove(events, 1) end
+            print("[Lesbhub Exporter] " .. value)
+        end
+        local function present(info, force)
+            local now = os.clock()
+            if not force and now - lastRender < 0.18 then return end
+            lastRender = now
+            local discovered = math.max(info.discovered or 1, 1)
+            if progress then
+                pcall(function()
+                    progress:SetRange(0, discovered)
+                    progress:Set(math.min(info.visited or 0, discovered))
+                end)
+            end
+            if status then
+                pcall(function()
+                    status:SetTitle(string.format("%s  /  pass %d",
+                        tostring(info.service or "Export"), tonumber(info.pass) or 1))
+                    status:SetDesc(string.format(
+                        "Visited: %d | Written: %d | Waiting: %d | Files: %d | Assets: %d | %.1fs",
+                        info.visited or 0, info.written or 0, info.pending or 0,
+                        info.files or 0, info.assetReferences or 0, info.elapsedSeconds or 0))
+                end)
+            end
+            if log then
+                local lines = {
+                    "LIVE  " .. tostring(info.stage or "scan"),
+                    "Class: " .. tostring(info.currentClass or "-"),
+                    "Path: " .. shortPath(info.currentPath),
+                    "Bytes: " .. tostring(info.bytes or 0),
+                    "--- Recent events ---",
+                }
+                for _, message in ipairs(events) do lines[#lines + 1] = message end
+                pcall(function() log:SetCode(table.concat(lines, "\n")) end)
+            end
+        end
+
+        if progress then
+            pcall(function() progress:SetRange(0, 1); progress:Set(0) end)
+        end
+        if status then pcall(function() status:SetTitle("Starting...") end) end
+        event(guiOnly and "Starting manual GUI snapshot" or "Starting exhaustive client capture")
+        if not guiOnly and runConfig.twoPassGui then
+            alert("Guided menu capture",
+                "After the initial scan, open STORE for pass 2, then SKINS for pass 3.")
+        end
+        task.spawn(function()
+            local ok, data, err = pcall(Engine.capture, runConfig, function(info)
+                if info.stage == "service_start" then
+                    event(string.format("Start %s (pass %s)", tostring(info.service), tostring(info.pass)))
+                elseif info.stage == "service_done" then
+                    event(string.format("Saved %s (pass %s): %d objects visited",
+                        tostring(info.service), tostring(info.pass), info.visited or 0))
+                elseif info.stage == "file_written" then
+                    event(string.format("File #%d written (%d records total)",
+                        info.files or 0, info.written or 0))
+                elseif info.stage == "waiting_gui_pass" then
+                    local nextPass = (tonumber(info.pass) or 1) + 1
+                    local suggested = nextPass == 2 and "STORE" or (nextPass == 3 and "SKINS" or "another menu")
+                    event("Open " .. suggested .. " now for next GUI snapshot")
+                    alert("Open a game menu", "Open " .. suggested ..
+                        " in the game before the next GUI snapshot (" .. tostring(runConfig.secondPassDelay) .. "s).")
+                elseif info.stage == "missing_root" then
+                    event("Missing accessible root: " .. tostring(info.service))
+                elseif info.stage == "done" then
+                    event("Capture finished: " .. tostring(info.service))
+                end
+                present(info, info.stage ~= "scanning")
+            end, runControl)
+            running = false
+            if not ok then
+                event("Export crashed: " .. tostring(data))
+                alert("Export failed", "Capture crashed; see console and live log.")
+            elseif not data then
+                event("Export failed: " .. tostring(err))
+                alert("Export failed", tostring(err))
+            else
+                local m = data.manifest
+                event(string.format("Done: %d records, %d data files, %d asset references",
+                    m.stats.written, m.stats.files, m.stats.assetReferences or 0))
+                if status then
+                    pcall(function()
+                        status:SetTitle("Finished: " .. m.status)
+                        status:SetDesc(data.folder .. "/manifest.json")
+                    end)
+                end
+                alert("Export " .. m.status,
+                    string.format("%d objects, %d files. Folder: %s",
+                        m.stats.written, m.stats.files, data.folder))
+                print("[Lesbhub Exporter] Output: " .. data.folder .. "/manifest.json")
+            end
+        end)
+    end
+
     capture:Button({
-        Title = "Start export", Icon = "download",
-        Callback = function()
-            if running then alert("Already capturing", "Use Cancel first.") return end
-            if type(writefile) ~= "function" or type(makefolder) ~= "function" then
-                alert("Missing executor APIs", "writefile and makefolder are required.")
-                return
-            end
-            running = true
-            control = {cancelled = false}
-            local runControl = control
-            local runConfig = {}
-            for key, value in pairs(config) do
-                if key == "targets" then
-                    runConfig.targets = {}
-                    for service, enabled in pairs(value) do runConfig.targets[service] = enabled end
-                else
-                    runConfig[key] = value
-                end
-            end
-            if progress and progress.Set then pcall(function() progress:Set(0) end) end
-            alert("Export started", "Capturing selected services. Roblox may be slower while traversing.")
-            task.spawn(function()
-                local ok, data, err = pcall(Engine.capture, runConfig, function(info)
-                    if progress and progress.Set then
-                        pcall(function() progress:Set(info.visited) end)
-                    end
-                    if info.stage == "service_done" then
-                        print(string.format("[Lesbhub Exporter] %s: %d objects visited, %d files",
-                            tostring(info.service), info.visited, info.files))
-                    end
-                end, runControl)
-                running = false
-                if not ok then
-                    alert("Export failed", "Capture crashed; see executor console.")
-                    warn("[Lesbhub Exporter] " .. tostring(data))
-                elseif not data then
-                    alert("Export failed", tostring(err))
-                else
-                    local m = data.manifest
-                    alert("Export " .. m.status,
-                        string.format("%d objects, %d files. Folder: %s",
-                            m.stats.written, m.stats.files, data.folder))
-                    print("[Lesbhub Exporter] Output: " .. data.folder .. "/manifest.json")
-                end
-            end)
-        end,
+        Title = "Start full export", Icon = "download",
+        Callback = function() startCapture(false) end,
+    })
+    capture:Button({
+        Title = "Capture GUI now", Icon = "monitor",
+        Desc = "Open STORE, SKINS or another menu yourself, then click this button.",
+        Callback = function() startCapture(true) end,
     })
     capture:Button({
         Title = "Cancel capture", Icon = "square",
         Callback = function()
             if running and control then
                 control.cancelled = true
-                alert("Cancel requested", "The exporter will stop at its next yield and write a partial manifest.")
+                alert("Cancellation requested", "Remaining buffered records will be flushed and a partial manifest written.")
             end
         end,
     })
     capture:Paragraph({
         Title = "Privacy reminder",
-        Desc = "Exports may contain game interface text. Never publish unreviewed captures. Player names and known sensitive tokens are redacted best-effort, not guaranteed.",
+        Desc = "Captures may contain GUI text. Review before publishing. Player-name and token redaction is best-effort.",
     })
     return Window
 end
