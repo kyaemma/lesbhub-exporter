@@ -1685,11 +1685,11 @@ function UI.open(Engine, restore)
         Callback = function() options:Select() end})
 
     dataset:Paragraph({Title = t("dataset_intro"), Desc = t("dataset_desc")})
-    dataset:Input({Title = t("game"), Value = config.label, Placeholder = "Criminality",
+    dataset:Input({Title = t("game"), Value = config.label, Placeholder = "My Roblox Experience",
         Callback = function(value) config.label = tostring(value) end})
-    dataset:Input({Title = t("category"), Value = config.category, Placeholder = "Criminality / Other",
+    dataset:Input({Title = t("category"), Value = config.category, Placeholder = "Adventure / Obby / Other",
         Callback = function(value) config.category = tostring(value) end})
-    dataset:Input({Title = t("variant"), Value = config.variant, Placeholder = "Official / Modded",
+    dataset:Input({Title = t("variant"), Value = config.variant, Placeholder = "Variant A / Original",
         Callback = function(value) config.variant = tostring(value) end})
     dataset:Dropdown({
         Title = t("format"), Values = {"JSON", "JSONL", "CSV"},
