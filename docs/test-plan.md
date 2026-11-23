@@ -1,12 +1,12 @@
 # V1 live test plan (manual; results pending)
 
-Potassium live results (modded Criminality variant, 2026-11-23): GUI-only capture completed with 28,418 objects and 7,173 asset references in 3.17 seconds. The next full-client export was partial at 14,000 visited, 13,800 written, with `json_encode_failed:ReplicatedStorage`. V0.2.1 added encoding recovery. Later screenshots show 223.7K records, 44.7K asset references and a 60.3-second run (partial status; cause needs manifest review). The v0.4 UI still needs live visual validation. The following scenarios are the acceptance suite.
+Potassium live results (modded Criminality variant, 2026-11-23): GUI-only capture completed with 28,418 objects and 7,173 asset references in 3.17 seconds. The next full-client export was partial at 14,000 visited, 13,800 written, with `json_encode_failed:ReplicatedStorage`. V0.2.1 added encoding recovery. Later screenshots show 223.7K records, 44.7K asset references and a 60.3-second run (partial status; cause needs manifest review). The v0.5 continuous monitoring mode still needs live Potassium validation. The following scenarios are the acceptance suite.
 
 | ID | Scenario | Expected result |
 |---|---|---|
 | E01 | Empty baseplate, GUI-only preset | manifest + PlayerGui/StarterGui chunks where roots exist, no `Source` |
 | E02 | ReplicatedStorage/Workspace on active Criminality variant | exhaustive capture, incremental writes, readable chunks, stable FPS |
-| E03 | Open STORE and SKINS between guided GUI passes | distinct `-p1-`, `-p2-` and `-p3-` files, GUI text included where visible to client |
+| E03 | Open any game-specific GUI during guided passes | distinct pass files, with new interface paths and text where visible to the client |
 | E04 | Stop during a long Workspace traversal | `cancelled` status and partial manifest, previously written files preserved |
 | E05 | Client dataset larger than 15,000 nodes and/or deeper than 28 levels | no global limit truncation; all reachable nodes enumerated until manual cancellation or actual runtime failure |
 | E06 | Missing `writefile` / `makefolder` | clear error, no silent upload / fallback exfiltration |
@@ -20,7 +20,7 @@ Potassium live results (modded Criminality variant, 2026-11-23): GUI-only captur
 | E14 | Audit public release | no real-world names, chat transcripts or private game strings committed |
 | E15 | Roblox asset-bearing instances | `Image`, `MeshId`, `Texture`, `SoundId` stored as references; no binary downloads claimed |
 | E16 | Detached log activity | changing path and real counters visible from Home/Capture/Map with no FPS spikes |
-| E17 | Manual GUI-only capture | separate snapshot of currently opened STORE or SKINS via Capture GUI now |
+| E17 | Manual GUI-only capture | separate snapshot of any currently open interface via Capture GUI now |
 | E18 | More than 100,000 discovered objects | indeterminate progress and exact compact K/M counters without a fake completion percentage |
 | E19 | Faulty UTF-8 property while scanning | record is recovered, other objects still exported, manifest `partial` explains modification |
 | E20 | Map geometry JSON | CFrame/Position/Size collected from reachable parts; no voxel/binary data claimed |
@@ -40,6 +40,15 @@ Potassium live results (modded Criminality variant, 2026-11-23): GUI-only captur
 | E34 | Map capture | floating log opens automatically and remains accessible |
 | E35 | WindUI modal button layout | long button labels stack within dialog, never overflow |
 | E36 | Native saveinstance() | any "Decompiling scripts" progress belongs to executor-native save, not JSON export |
+| E37 | Continuous capture on unrelated game | no hardcoded names or menu assumptions; starts with initial snapshot |
+| E38 | Open new client menu during monitoring | new GUI nodes appear in delta files with `operation=add` |
+| E39 | Modify existing GUI Text/Visible | subsequent delta has `operation=update`; unchanged records omitted |
+| E40 | Remove GUI node during monitoring | delta tombstone has `operation=remove` |
+| E41 | Stop & Save between GUI intervals | final GUI sweep captures last changes; status becomes `stopped` and manifest is complete |
+| E42 | Cancel during monitoring | status is `cancelled`, not `stopped`; buffered chunks remain |
+| E43 | Long recording / forced disconnect | periodically updated manifest uses `status=recording`; no indefinite in-memory accumulation of entire event history |
+| E44 | Capture UI colors | start/full/stop/cancel visually distinct from informational sections |
+| E45 | No game-specific prompts | no references to specific experience interfaces in source or UI |
 
 For each run record: executor version, client FPS before/during/after, duration, number of visited/written objects, number of files, manifest status, and validation output. Avoid including player names in test logs.
 

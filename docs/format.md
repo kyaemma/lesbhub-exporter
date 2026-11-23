@@ -56,7 +56,7 @@ Header: `path,parentPath,name,className,depth,properties_json`. The `properties_
 ```json
 {
   "schemaVersion": 1,
-  "exporterVersion": "0.4.0",
+  "exporterVersion": "0.5.0",
   "clientOnly": true,
   "game": {
     "label": "Criminality",
@@ -82,7 +82,7 @@ Header: `path,parentPath,name,className,depth,properties_json`. The `properties_
 }
 ```
 
-`status` is `complete`, `partial`, or `cancelled`. Even a `complete` export represents only a client-visible snapshot; never interpret it as every object in the experience.
+`status` is `complete`, `partial`, `cancelled`, `stopped` (continuous mode stopped normally) or `recording` (provisional checkpoint). Even a `complete` export represents only a client-visible snapshot; never interpret it as every object in the experience.
 
 ## Guidelines for later signature research (not implemented here)
 
@@ -103,3 +103,24 @@ The **Export map geometry** button uses the same versioned chunk schema and expo
 If a chunk cannot be JSON-encoded, it is recursively subdivided until the problematic record can be isolated. The engine first attempts property-level recovery, then uses placeholder values if necessary. Capture status becomes `partial` and `partialReasons` can contain `record_serialization_recovered` or `property_serialization_error`. A recovery means records were preserved, **not** that every property was preserved without change.
 
 A native place file from `saveinstance()` is a separate executor-controlled format and **does not** follow this JSON schema or the JSON privacy filtering.
+
+## Continuous capture / event deltas (v0.5.0)
+
+The initial scan writes ordinary **pass 1** files. During continuous monitoring, newly detected client objects, property changes and removals are emitted in later files using the same schema, with extra keys on each changed record:
+
+```json
+{
+  "operation": "update",
+  "observedAtUtc": "2026-11-23T15:10:00Z",
+  "name": "MenuTitle", "className": "TextLabel",
+  "path": "PlayerGui/Menu/MenuTitle",
+  "parentPath": "PlayerGui/Menu", "depth": 2,
+  "properties": {"Text": "New title"}
+}
+```
+
+Operations are `add`, `update`, or `remove`. For removals `properties` is an empty JSON object. Always process chunks in pass order and chunk index order, and distinguish snapshots from deltas. Event-based structural records are written as pass 2; periodic rescans use later passes. A path is best-effort and is not guaranteed stable across duplicate sibling names or simultaneous moves.
+
+During an active capture `manifest.json` is periodically overwritten with `status=recording`. Pressing **Stop & Save** writes the final manifest with `status=stopped`, `endedReason=user_stopped`, `settings.captureMode=continuous`, and counters `monitorCycles`, `deltaRecords`, `added`, `updated`, `removed`. Cancel instead yields `status=cancelled`.
+
+Continuous mode does not infer a final object count, does not bypass Roblox streaming, and does not invoke game remotes or trigger UI actions. No specific game or menu names are assumed.

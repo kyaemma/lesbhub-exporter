@@ -6,7 +6,7 @@ The UI is built with our [Lesbhub WindUI fork](https://github.com/kyaemma/lesbhu
 
 ## Status
 
-**v0.4.0: bilingual Home and floating activity journal.** Earlier Potassium captures have demonstrated large exports; the most recent screenshots show 223.7K objects, 44.7K asset references and a 60.3-second run (partial status, reason not yet confirmed from its manifest). This UI update is validated with Luau and Python automated tests, including a simulated floating journal. A visual Potassium retest is still needed.
+**v0.5.0: universal continuous capture, Stop & Save and clearer action buttons.** Earlier Potassium captures have demonstrated large exports; the most recent screenshots show 223.7K objects, 44.7K asset references and a 60.3-second run (partial status, reason not yet confirmed from its manifest). This UI update is validated with Luau and Python automated tests, including a simulated floating journal. A visual Potassium retest is still needed.
 
 ## Run from a supported Roblox client environment
 
@@ -24,14 +24,16 @@ For offline/manual distribution, use `dist/lesbhub-exporter.lua` (but the UI sti
 - **Targets:** multi-select searchable dropdown, with **all services selected by default**, plus one-click presets for all, GUI-only and game structures.
 - **Properties:** names, classes, parent/child paths, depth, GUI labels/text/buttons, TextBox placeholders, visual styles, asset IDs, selected world properties and basic values.
 - **Formats:** chunked JSON, JSONL or CSV; one **manifest.json** per capture, with settings, counts, status, errors, and partial reasons.
-- **Full export + GUI:** one action for structures and guided GUI snapshots (4 passes by default in Max informations); optional extra **Capture GUI now** for an ad-hoc menu. Open menus yourself; the exporter does not simulate clicks, purchases or remote calls.
+- **One-time full export + GUI:** one action for structures and guided GUI snapshots (4 passes by default in Max information). Open and close any UI elements during the guided passes; no game-specific menu names or automation.
+- **Continuous capture:** starts with an exhaustive snapshot, then watches new/removed client instances and periodically compares GUI snapshots, saving only added, updated or removed records. Continues until **Stop & Save** or Cancel. A final GUI sweep is performed when stopped. No duration or global size cap.
+- **Capture controls:** visually distinct tinted primary action buttons (blue for full export, teal for continuous, amber for Stop & Save, dark secondary actions, red for Cancel).
 - **Floating activity log:** detached draggable journal, auto-opened for every export, with exact K/M counters, current path, recent events and copy control. No false percentage.
 - **Map tab:** JSON geometry export (Workspace/Lighting/SoundService, BasePart position/CFrame/size, Model world pivot, materials and asset references). Optional separate native `saveinstance()` command like Infinite Yield, only after explicit opt-in and only if the executor supports it.
 - **Fault tolerance:** JSON serialization errors are isolated to the offending records. Recovery keeps traversing and records a `partial` manifest status instead of aborting a whole service.
 - **Performance:** iterative depth-first traversal, periodic `task.wait()`, small chunk files, cancellation and no global depth/object/total-byte/string-length cap.
 - **Privacy:** skips other players' characters, chat GUI, `CoreGui` and script source. All UI presets **enable** TextBox.Text and StringValue.Value for local research; every capture requires acknowledging a private-data warning. Redaction of known player names and common token patterns remains best-effort.
 
-## WindUI interface (v0.4)
+## WindUI interface (v0.5)
 
 The interface defaults to **English**. The new **Home** tab provides shortcuts to Full export + GUI, GUI-only capture, map export, the floating log, Targets and Options.
 
@@ -50,6 +52,19 @@ All target services are selected initially. **Full export + GUI** always include
 | Fast | All object names/classes, GUI text, asset references and opted-in values, fewer visual/world properties | 2 | Faster |
 
 The advanced settings remain collapsed by default. Every export confirms that local data may be sensitive, and no data is uploaded by the exporter.
+
+### Continuous mode (universal)
+
+Click **Start continuous capture** in Home or Capture. The exporter first saves all selected client-visible objects (including PlayerGui and StarterGui). After that:
+- `DescendantAdded`/`DescendantRemoving` events capture short-lived structural changes in the selected services, including Workspace.
+- PlayerGui and StarterGui are periodically re-scanned (interval configurable in **Options → Advanced**) to detect new interfaces, changing labels and visibility.
+- Other selected non-Workspace services are rechecked less frequently; Workspace uses events instead of constantly traversing the full map.
+- Only **deltas** are written after the baseline: `operation=add`, `update` or `remove`. An unchanged object is not saved again.
+- **Stop & Save** stops monitoring, does one final GUI comparison, flushes records and finalizes `manifest.json` with `status=stopped`. **Cancel capture** is different: it records an explicit cancellation.
+
+The local manifest is periodically checkpointed with `status=recording`, for inspection if Roblox closes unexpectedly. The capture may grow while monitoring continues; keep sufficient free disk space. No game-specific GUI text, names, remotes or menus are hardcoded. The engine does not open game menus or invoke remotes. If a menu is not loaded into the client, open it yourself while monitoring.
+
+A clean stop is needed for a definitive `stopped` manifest; forced process termination can leave only the last `recording` checkpoint. The feature is not guaranteed to observe objects that appear and disappear entirely while Roblox is suspended or before monitoring begins.
 
 ### Floating journal
 
@@ -84,7 +99,7 @@ The timestamp and clock suffix are **run identifiers**, not signature material. 
 
 1. Start a Roblox session and launch the exporter. Enter a game label, category and variant.
 2. Select target services and output format. Use GUI-only for targeted interface studies or full client for broad structural comparisons.
-3. In **Options**, choose **Max information**, **Smart** or **Fast**. Use **Advanced** only if you want to customize details. **Full export + GUI** includes guided GUI snapshots by default: open **STORE** and **SKINS** when prompted. **Capture GUI now** is optional.
+3. In **Options**, choose **Max information**, **Smart** or **Fast**. Use **Advanced** only if you want to customize details. **Full export + GUI** includes guided GUI snapshots. You can open any in-game menu during capture; no special interface is assumed. For longer exploration, choose **Start continuous capture**, then press **Stop & Save** when finished.
 4. Read and accept the **local-data privacy confirmation** before the capture starts. Then review the `manifest.json` (especially `status`, `partialReasons` and counts), and validate the directory:
    ```powershell
    python scripts/validate_export.py "C:\path\to\LesbhubExporter\criminality\criminality\variant-a\run-folder"
