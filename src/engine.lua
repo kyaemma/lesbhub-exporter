@@ -635,7 +635,11 @@ function Exporter.capture(options, onProgress, control)
             createdDataFolders[directory] = true
         end
 
-        local key = category .. "/" .. serviceName .. "/p" .. tostring(pass)
+        -- Flat mode has one index namespace per service/pass to avoid
+        -- category A overwriting category B's p1-0001 chunk.
+        local key = cfg.organizedOutput
+            and (category .. "/" .. serviceName .. "/p" .. tostring(pass))
+            or (serviceName .. "/p" .. tostring(pass))
         local part = (chunkIndexes[key] or 0) + 1
         local ext = cfg.format == "json" and "json" or cfg.format
         local filename
@@ -784,13 +788,6 @@ function Exporter.capture(options, onProgress, control)
                         break
                     end
                     state.classes[class] = (state.classes[class] or 0) + 1
-                    if #records >= cfg.chunkSize then
-                        if not flush(records, serviceName, pass) then
-                            state.stopped = true
-                            break
-                        end
-                        records = {}
-                    end
 
                     local okChildren, children = pcall(function() return obj:GetChildren() end)
                     if not okChildren then
