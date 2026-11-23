@@ -248,6 +248,10 @@ local monitored, monitorError = Exporter.capture({
     if info.stage == "monitoring_start" then
         monitorStarted = true
         table.insert(gui._children, genericMenu)
+        label.Text = "Updated during monitoring"
+        for i, child in ipairs(gui._children) do
+            if child == image then table.remove(gui._children, i); break end
+        end
         monitorControl.stopRequested = true
     end
 end, monitorControl)
@@ -257,11 +261,16 @@ assert(monitored.manifest.status == "stopped", "User stop must not be a cancella
 assert(monitored.manifest.endedReason == "user_stopped")
 assert(monitored.manifest.settings.continuous == true)
 assert(monitored.manifest.settings.captureMode == "continuous")
-assert(monitored.manifest.stats.deltaRecords >= 2,
-    "New generic GUI should be captured as delta records")
+assert(monitored.manifest.stats.deltaRecords >= 4,
+    "New, changed and removed GUI records should all produce deltas")
+assert(monitored.manifest.stats.added >= 2)
+assert(monitored.manifest.stats.updated >= 1)
+assert(monitored.manifest.stats.removed >= 1)
 assert(monitored.manifest.services.PlayerGui.passes >= 2)
 local foundMenu = false
 local foundButton = false
+local foundUpdated = false
+local foundRemoved = false
 for filename, chunk in pairs(writes) do
     if filename:find(monitored.folder, 1, true) and filename:find("-p2-", 1, true) then
         for _, record in ipairs(chunk.records or {}) do
@@ -269,11 +278,16 @@ for filename, chunk in pairs(writes) do
                 foundMenu = true
             elseif record.name == "ConfirmAction" and record.operation == "add" then
                 foundButton = record.properties.Text == "Continue"
+            elseif record.name == "Title" and record.operation == "update" then
+                foundUpdated = record.properties.Text == "Updated during monitoring"
+            elseif record.name == "Logo" and record.operation == "remove" then
+                foundRemoved = true
             end
         end
     end
 end
-assert(foundMenu and foundButton, "Final GUI delta missing newly opened menu")
+assert(foundMenu and foundButton and foundUpdated and foundRemoved,
+    "Final delta must capture added, updated and removed GUI objects")
 assert(not monitorControl.cancelled, "Stop & Save must not trigger Cancel")
 print("Luau continuous smoke OK: generic menu deltas, no hardcoded names, stopped manifest")
 
