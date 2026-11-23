@@ -1,0 +1,6 @@
+[submodule "reference/infiniteyield"]
+	path = reference/infiniteyield
+	url = https://github.com/EdgeIY/infiniteyield.git
+[submodule "reference/roblox-script-exporter"]
+	path = reference/roblox-script-exporter
+	url = https://github.com/patangation/roblox-script-exporter.git
