@@ -123,7 +123,7 @@ local seenAsset = false
 local seenGuiScript = false
 local sawNestedGui = false
 for path, value in pairs(writes) do
-    if (path:find("-p1-", 1, true) or path:find("/p1-", 1, true)) or path:find("/p1-", 1, true) then
+    if path:find("-p1-", 1, true) or path:find("/p1-", 1, true) then
         for _, record in ipairs(value.records or {}) do
             if record.name == "Title" then
                 seenLabel = true
