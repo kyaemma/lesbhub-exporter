@@ -12,5 +12,27 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - run: python scripts/build.py --check
-      - run: python -m unittest discover -s tests -v
+      - name: Check generated bundle
+        run: python scripts/build.py --check
+      - name: Validate export fixtures
+        run: python -m unittest discover -s tests -v
+  luau-checks:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: false
+      - name: Download Luau 0.748 tools
+        run: |
+          curl --fail --silent --show-error --location https://github.com/luau-lang/luau/releases/download/0.748/luau-ubuntu.zip --output /tmp/luau.zip
+          mkdir -p /tmp/luau
+          unzip -q /tmp/luau.zip -d /tmp/luau
+          chmod +x /tmp/luau/luau /tmp/luau/luau-compile
+      - name: Compile Luau files
+        run: |
+          /tmp/luau/luau-compile src/engine.lua > /dev/null
+          /tmp/luau/luau-compile src/ui.lua > /dev/null
+          /tmp/luau/luau-compile dist/lesbhub-exporter.lua > /dev/null
+          /tmp/luau/luau-compile tests/mock_capture.luau > /dev/null
+      - name: Run mock client smoke test
+        run: /tmp/luau/luau tests/mock_capture.luau
