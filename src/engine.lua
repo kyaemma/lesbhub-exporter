@@ -250,8 +250,13 @@ local function collectProperties(instance, cfg, state)
         elseif ASSET_PROPERTIES[property] then
             allowed = cfg.assets
         elseif property == "Value" then
-            allowed = cfg.worldProperties and
-                (class ~= "StringValue" or (cfg.stringValues and not sensitiveStringValue))
+            if class == "StringValue" then
+                -- Text values have their own privacy setting, independently
+                -- of world geometry/layout property collection.
+                allowed = cfg.stringValues and not sensitiveStringValue
+            else
+                allowed = cfg.worldProperties
+            end
         elseif unique[property] == "gui" then
             allowed = cfg.guiProperties
         else
