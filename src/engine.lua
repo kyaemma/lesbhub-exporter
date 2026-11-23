@@ -1,7 +1,7 @@
 -- Lesbhub Exporter V1 - client-side, read-only capture engine.
 -- No script source, remote invocation, executor introspection, or network upload.
 local Exporter = {}
-Exporter.VERSION = "0.1.0"
+Exporter.VERSION = "0.2.0"
 Exporter.SCHEMA_VERSION = 1
 Exporter.TARGETS = {
     "ReplicatedStorage", "ReplicatedFirst", "StarterGui", "PlayerGui",
@@ -26,7 +26,8 @@ local GUI_CLASSES = {
     TextButton = {"Text", "TextSize", "TextColor3", "TextTransparency", "Font", "RichText", "TextScaled", "TextWrapped", "AutoButtonColor"},
     TextBox = {"Text", "PlaceholderText", "PlaceholderColor3", "TextColor3", "TextSize", "Font", "ClearTextOnFocus", "MultiLine", "TextEditable"},
     ImageLabel = {"Image", "ImageColor3", "ImageTransparency", "ScaleType"},
-    ImageButton = {"Image", "ImageColor3", "ImageTransparency", "ScaleType", "AutoButtonColor"},
+    ImageButton = {"Image", "HoverImage", "PressedImage", "ImageColor3", "ImageTransparency", "ScaleType", "AutoButtonColor"},
+    VideoFrame = {"Video", "Playing", "Looped", "Volume"},
     UIListLayout = {"FillDirection", "HorizontalAlignment", "VerticalAlignment", "SortOrder", "Padding"},
     UIGridLayout = {"CellSize", "CellPadding", "FillDirection", "SortOrder"},
     UICorner = {"CornerRadius"},
@@ -48,6 +49,13 @@ local OTHER_CLASSES = {
     Sound = {"SoundId", "Volume", "Looped"},
     Animation = {"AnimationId"},
     ParticleEmitter = {"Texture", "Enabled", "Rate"},
+    Beam = {"Texture", "Enabled", "Transparency"},
+    Trail = {"Texture", "Enabled", "Transparency"},
+    SurfaceAppearance = {"ColorMap", "NormalMap", "MetalnessMap", "RoughnessMap"},
+    Shirt = {"ShirtTemplate"},
+    Pants = {"PantsTemplate"},
+    ShirtGraphic = {"Graphic"},
+    Sky = {"SkyboxBk", "SkyboxDn", "SkyboxFt", "SkyboxLf", "SkyboxRt", "SkyboxUp", "SunTextureId", "MoonTextureId"},
     ProximityPrompt = {"ActionText", "ObjectText", "Enabled", "HoldDuration", "MaxActivationDistance"},
     ClickDetector = {"MaxActivationDistance"},
     BoolValue = {"Value"},
@@ -133,7 +141,6 @@ local function sanitizedString(value, cfg, state)
         return token
     end)
     s = scrubPlayers(s, state.aliases)
-    if #s > cfg.maxString then s = s:sub(1, cfg.maxString) .. "[truncated]" end
     if s ~= before then state.redactions = state.redactions + 1 end
     return s
 end
@@ -182,6 +189,11 @@ end
 local ASSET_PROPERTIES = {
     Image = true, Texture = true, TextureId = true, TextureID = true,
     MeshId = true, SoundId = true, AnimationId = true, HoverImage = true,
+    PressedImage = true, Video = true, ColorMap = true, NormalMap = true,
+    MetalnessMap = true, RoughnessMap = true, ShirtTemplate = true,
+    PantsTemplate = true, Graphic = true, SkyboxBk = true, SkyboxDn = true,
+    SkyboxFt = true, SkyboxLf = true, SkyboxRt = true, SkyboxUp = true,
+    SunTextureId = true, MoonTextureId = true,
 }
 local TEXT_PROPERTIES = {Text = true, PlaceholderText = true}
 
@@ -240,8 +252,24 @@ local function collectProperties(instance, cfg, state)
             if not ok then
                 addError(state, "property_unavailable:" .. class .. "." .. property)
             else
-                local encoded = serialize(value, cfg, state)
-                if encoded ~= nil then properties[property] = encoded end
+                local encoded
+                if ASSET_PROPERTIES[property] and typeof(value) == "string" then
+                    -- Normalize public Roblox asset URL IDs; never preserve arbitrary signed URLs.
+                    local publicId = value:match("^https?://[%w%.%-]*roblox%.com/asset/%?id=(%d+)")
+                    if publicId then
+                        encoded = "rbxassetid://" .. publicId
+                    else
+                        encoded = serialize(value, cfg, state)
+                    end
+                else
+                    encoded = serialize(value, cfg, state)
+                end
+                if encoded ~= nil then
+                    properties[property] = encoded
+                    if ASSET_PROPERTIES[property] and type(encoded) == "string" and encoded ~= "" then
+                        state.assetReferences = state.assetReferences + 1
+                    end
+                end
             end
         end
     end
@@ -337,9 +365,8 @@ local function normalizedConfig(input)
         end
     end
     if type(input.targets) ~= "table" then
-        for _, service in ipairs({"ReplicatedStorage", "ReplicatedFirst", "StarterGui", "PlayerGui", "StarterPlayer"}) do
-            cfg.targets[service] = true
-        end
+        -- No implicit omissions: start from a full client-visible snapshot.
+        for _, service in ipairs(Exporter.TARGETS) do cfg.targets[service] = true end
     end
     cfg.guiTexts = input.guiTexts ~= false
     cfg.guiProperties = input.guiProperties ~= false
@@ -348,13 +375,13 @@ local function normalizedConfig(input)
     cfg.textboxValues = input.textboxValues == true
     cfg.stringValues = input.stringValues == true
     cfg.twoPassGui = input.twoPassGui == true
-    cfg.secondPassDelay = clamp(input.secondPassDelay, 1, 10, 3)
-    cfg.maxNodes = clamp(input.maxNodes, 500, 50000, 15000)
-    cfg.maxDepth = clamp(input.maxDepth, 2, 80, 28)
-    cfg.yieldEvery = clamp(input.yieldEvery, 15, 500, 80)
+    cfg.guiPasses = clamp(input.guiPasses, 2, 12, 3)
+    cfg.secondPassDelay = clamp(input.secondPassDelay, 1, 30, 6)
+    -- Chunk size and yield cadence bound *per-step* work, not the exported dataset.
+    cfg.yieldEvery = clamp(input.yieldEvery, 10, 250, 60)
     cfg.chunkSize = clamp(input.chunkSize, 25, 800, 200)
-    cfg.maxString = clamp(input.maxString, 32, 1024, 256)
-    cfg.maxBytes = clamp(input.maxBytes, 1024 * 1024, 64 * 1024 * 1024, 16 * 1024 * 1024)
+    -- No global maxNodes, maxDepth, maxBytes, or maxString. These silently
+    -- truncated the dataset and prevented structural comparisons.
     return cfg
 end
 
@@ -362,7 +389,12 @@ local function notify(callback, stage, state, extra)
     if type(callback) == "function" then
         pcall(callback, {
             stage = stage, visited = state.visited, written = state.written,
-            files = state.fileCount, bytes = state.bytes, service = extra,
+            files = state.fileCount, bytes = state.bytes,
+            service = extra or state.currentService, pass = state.currentPass,
+            discovered = state.discovered, pending = state.pending,
+            currentPath = state.currentPath, currentClass = state.currentClass,
+            assetReferences = state.assetReferences,
+            elapsedSeconds = os.clock() - state.startedAt,
         })
     end
 end
@@ -382,7 +414,9 @@ function Exporter.capture(options, onProgress, control)
     local aliases, characters = playerAliases()
     local state = {
         aliases = aliases, characters = characters, redactions = 0,
-        visited = 0, written = 0, fileCount = 0, bytes = 0,
+        visited = 0, written = 0, fileCount = 0, bytes = 0, discovered = 0,
+        pending = 0, assetReferences = 0, currentPath = "", currentClass = "",
+        currentService = "", currentPass = 1, startedAt = os.clock(),
         errors = {}, errorCount = 0, partialReasons = {}, services = {},
         classes = {}, cancelled = false, stopped = false,
     }
@@ -406,10 +440,6 @@ function Exporter.capture(options, onProgress, control)
             partial("encoding_error")
             return false
         end
-        if state.bytes + #encoded > cfg.maxBytes then
-            partial("byte_limit")
-            return false
-        end
         local ext = cfg.format == "json" and "json" or cfg.format
         local filename = string.format("%s/%s-p%d-%04d.%s", base, serviceName, pass, part, ext)
         local ok = pcall(writefile, filename, encoded)
@@ -423,6 +453,7 @@ function Exporter.capture(options, onProgress, control)
         state.written = state.written + #records
         state.services[serviceName].records = state.services[serviceName].records + #records
         state.services[serviceName].files = state.services[serviceName].files + 1
+        notify(onProgress, "file_written", state, serviceName)
         return true
     end
 
@@ -431,23 +462,27 @@ function Exporter.capture(options, onProgress, control)
         local root = rootInstance(serviceName)
         if not root then
             partial("missing_root:" .. serviceName)
+            notify(onProgress, "missing_root", state, serviceName)
             return
         end
         state.services[serviceName] = state.services[serviceName] or
             {visited = 0, records = 0, files = 0, passes = 0}
         state.services[serviceName].passes = state.services[serviceName].passes + 1
-        local queue = {{instance = root, depth = 0, path = serviceName, parent = ""}}
-        local head, enqueued, part = 1, 1, 1
-        local records = {}
-        local seen = setmetatable({}, {__mode = "k"})
 
-        notify(onProgress, "scanning", state, serviceName)
-        while head <= #queue do
+        -- Iterative depth-first scan: memory is tied to the current frontier,
+        -- not to every object already encountered, and no depth is excluded.
+        local stack = {{instance = root, depth = 0, path = serviceName, parent = ""}}
+        local records, part = {}, 1
+        local seen = setmetatable({}, {__mode = "k"})
+        state.currentService = serviceName
+        state.currentPass = pass
+        state.discovered = state.discovered + 1
+        state.pending = #stack
+
+        notify(onProgress, "service_start", state, serviceName)
+        while #stack > 0 do
             if stopCheck() then break end
-            if state.visited >= cfg.maxNodes then partial("node_limit"); state.stopped = true; break end
-            local entry = queue[head]
-            queue[head] = false
-            head = head + 1
+            local entry = table.remove(stack)
             local obj = entry.instance
             if not seen[obj] then
                 seen[obj] = true
@@ -456,6 +491,8 @@ function Exporter.capture(options, onProgress, control)
                 local okClass, class = pcall(function() return obj.ClassName end)
                 if not okClass then class = "Unknown" end
                 local name = entry.depth == 0 and serviceName or readName(obj, cfg, state)
+                state.currentPath = entry.path
+                state.currentClass = class
                 local properties = collectProperties(obj, cfg, state)
                 table.insert(records, {
                     name = name, className = class, path = entry.path,
@@ -464,7 +501,10 @@ function Exporter.capture(options, onProgress, control)
                 state.classes[class] = (state.classes[class] or 0) + 1
 
                 if #records >= cfg.chunkSize then
-                    if not flush(records, serviceName, pass, part) then state.stopped = true; break end
+                    if not flush(records, serviceName, pass, part) then
+                        state.stopped = true
+                        break
+                    end
                     records = {}
                     part = part + 1
                 end
@@ -473,39 +513,38 @@ function Exporter.capture(options, onProgress, control)
                 if not okChildren then
                     addError(state, "children_unavailable:" .. class)
                     partial("children_unavailable")
-                elseif entry.depth >= cfg.maxDepth then
-                    if #children > 0 then partial("depth_limit") end
                 else
-                    local counts = {}
+                    local siblingCounts = {}
+                    local nextEntries = {}
                     for _, child in ipairs(children) do
                         if not isForbidden(child, serviceName, state) then
-                            local segment = readName(child, cfg, state)
-                            local safeSegment = segment:gsub("[./\\]", "_")
-                            local key = safeSegment -- disambiguate same-name siblings, regardless of ClassName
-                            counts[key] = (counts[key] or 0) + 1
-                            if enqueued < cfg.maxNodes then
-                                local suffix = counts[key] > 1 and ("~" .. counts[key]) or ""
-                                table.insert(queue, {
-                                    instance = child, depth = entry.depth + 1,
-                                    path = entry.path .. "/" .. safeSegment .. suffix,
-                                    parent = entry.path,
-                                })
-                                enqueued = enqueued + 1
-                            else
-                                partial("queue_limit")
-                            end
+                            local segment = readName(child, cfg, state):gsub("[./\\]", "_")
+                            siblingCounts[segment] = (siblingCounts[segment] or 0) + 1
+                            local suffix = siblingCounts[segment] > 1 and ("~" .. siblingCounts[segment]) or ""
+                            table.insert(nextEntries, {
+                                instance = child, depth = entry.depth + 1,
+                                path = entry.path .. "/" .. segment .. suffix,
+                                parent = entry.path,
+                            })
                         end
+                    end
+                    for i = #nextEntries, 1, -1 do
+                        stack[#stack + 1] = nextEntries[i]
+                        state.discovered = state.discovered + 1
                     end
                 end
             end
+            state.pending = #stack
             if state.visited % cfg.yieldEvery == 0 then
                 notify(onProgress, "scanning", state, serviceName)
                 task.wait()
             end
         end
-        if not state.stopped and #records > 0 then
+        -- A manual cancellation preserves already-inspected, not-yet-flushed records.
+        if #records > 0 and (not state.stopped or state.cancelled) then
             if not flush(records, serviceName, pass, part) then state.stopped = true end
         end
+        state.pending = 0
         notify(onProgress, "service_done", state, serviceName)
     end
 
@@ -524,15 +563,18 @@ function Exporter.capture(options, onProgress, control)
         if ok and streaming then partial("workspace_streaming_enabled") end
     end
 
-    if cfg.twoPassGui and not state.stopped then
-        notify(onProgress, "waiting_second_pass", state, "PlayerGui")
-        local delayEnd = os.clock() + cfg.secondPassDelay
-        while os.clock() < delayEnd and not stopCheck() do task.wait(0.1) end
-        if not state.stopped then
+    if cfg.twoPassGui and not state.stopped
+        and (cfg.targets.PlayerGui or cfg.targets.StarterGui) then
+        for pass = 2, cfg.guiPasses do
+            notify(onProgress, "waiting_gui_pass", state, "PlayerGui")
+            local deadline = os.clock() + cfg.secondPassDelay
+            while os.clock() < deadline and not stopCheck() do task.wait(0.1) end
+            if state.stopped then break end
             for _, service in ipairs({"PlayerGui", "StarterGui"}) do
-                if cfg.targets[service] then scan(service, 2) end
+                if cfg.targets[service] then scan(service, pass) end
                 if state.stopped then break end
             end
+            if state.stopped then break end
         end
     end
 
@@ -556,7 +598,8 @@ function Exporter.capture(options, onProgress, control)
         stats = {
             visited = state.visited, written = state.written, files = state.fileCount,
             bytes = state.bytes, redactions = state.redactions, errors = state.errorCount,
-            classCounts = state.classes,
+            assetReferences = state.assetReferences, classCounts = state.classes,
+            elapsedSeconds = os.clock() - state.startedAt,
         },
         services = state.services,
         errors = state.errors,
@@ -565,9 +608,9 @@ function Exporter.capture(options, onProgress, control)
             guiProperties = cfg.guiProperties, worldProperties = cfg.worldProperties,
             assets = cfg.assets, textboxValues = cfg.textboxValues,
             stringValues = cfg.stringValues, twoPassGui = cfg.twoPassGui,
-            maxNodes = cfg.maxNodes, maxDepth = cfg.maxDepth,
-            chunkSize = cfg.chunkSize, maxString = cfg.maxString,
-            maxBytes = cfg.maxBytes,
+            guiPasses = cfg.guiPasses, secondPassDelay = cfg.secondPassDelay,
+            chunkSize = cfg.chunkSize, yieldEvery = cfg.yieldEvery,
+            captureMode = "exhaustive",
         },
         privacy = {
             excludesOtherPlayerCharacters = true,
@@ -580,6 +623,9 @@ function Exporter.capture(options, onProgress, control)
         notes = {
             "Client view only: server-only objects are unavailable.",
             "StreamingEnabled can result in missing Workspace descendants.",
+            "No global node, depth, total byte, or string-length limit is applied.",
+            "GUI snapshots are not merged; lazy menus must be opened by the operator.",
+            "Asset references are exported as property values; binary assets are not downloaded.",
             "Paths and GUI strings can still contain contextual data; review before publishing.",
             "IDs, volatile paths and dynamic player fields must not be used in detection signatures.",
         },
