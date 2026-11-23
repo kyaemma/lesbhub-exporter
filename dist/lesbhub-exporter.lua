@@ -5,7 +5,7 @@ local function loadEngine()
 -- Lesbhub Exporter V1 - client-side, read-only capture engine.
 -- No script source, remote invocation, executor introspection, or network upload.
 local Exporter = {}
-Exporter.VERSION = "0.4.0"
+Exporter.VERSION = "0.5.0"
 Exporter.SCHEMA_VERSION = 1
 Exporter.TARGETS = {
     "ReplicatedStorage", "ReplicatedFirst", "StarterGui", "PlayerGui",
@@ -400,6 +400,10 @@ local function normalizedConfig(input)
     cfg.textboxValues = input.textboxValues == true
     cfg.stringValues = input.stringValues == true
     cfg.twoPassGui = input.twoPassGui == true
+    cfg.continuous = input.continuous == true
+    -- Continuous monitoring continues until an explicit stop/cancel.
+    -- The interval is a cadence, NOT a dataset or duration cap.
+    cfg.continuousInterval = clamp(input.continuousInterval, 1, 30, 3)
     cfg.guiPasses = clamp(input.guiPasses, 2, 12, 3)
     cfg.secondPassDelay = clamp(input.secondPassDelay, 1, 30, 6)
     -- Chunk size and yield cadence bound *per-step* work, not the exported dataset.
@@ -419,9 +423,41 @@ local function notify(callback, stage, state, extra)
             discovered = state.discovered, pending = state.pending,
             currentPath = state.currentPath, currentClass = state.currentClass,
             assetReferences = state.assetReferences,
+            monitoring = state.monitoring or false,
+            monitorCycles = state.monitorCycles or 0,
+            deltaRecords = state.deltaRecords or 0,
+            added = state.added or 0,
+            updated = state.updated or 0,
+            removed = state.removed or 0,
             elapsedSeconds = os.clock() - state.startedAt,
         })
     end
+end
+
+-- Stable, order-independent fingerprint for selected public/allowlisted fields.
+-- It is deliberately independent of JSON object-key iteration order.
+local function stableValue(value, depth)
+    if depth > 7 then return "<depth>" end
+    if type(value) ~= "table" then return type(value) .. ":" .. tostring(value) end
+    local keys = {}
+    for key in pairs(value) do keys[#keys + 1] = key end
+    table.sort(keys, function(a, b)
+        if type(a) ~= type(b) then return type(a) < type(b) end
+        return tostring(a) < tostring(b)
+    end)
+    local parts = {"{"}
+    for _, key in ipairs(keys) do
+        parts[#parts + 1] = tostring(key)
+        parts[#parts + 1] = "="
+        parts[#parts + 1] = stableValue(value[key], depth + 1)
+        parts[#parts + 1] = ";"
+    end
+    parts[#parts + 1] = "}"
+    return table.concat(parts)
+end
+
+local function recordFingerprint(record)
+    return tostring(record.className) .. "|" .. stableValue(record.properties or {}, 0)
 end
 
 function Exporter.capture(options, onProgress, control)
@@ -444,6 +480,8 @@ function Exporter.capture(options, onProgress, control)
         currentService = "", currentPass = 1, startedAt = os.clock(),
         errors = {}, errorCount = 0, partialReasons = {}, services = {},
         classes = {}, cancelled = false, stopped = false,
+        stopRequested = false, monitoring = false, monitorCycles = 0,
+        deltaRecords = 0, added = 0, updated = 0, removed = 0,
     }
     local function partial(reason)
         if not state.partialReasons[reason] then state.partialReasons[reason] = true end
@@ -453,11 +491,16 @@ function Exporter.capture(options, onProgress, control)
             state.cancelled = true
             state.stopped = true
             partial("user_cancelled")
+        elseif cfg.continuous and control.stopRequested then
+            -- Expected user action, not an error or a failed capture.
+            state.stopRequested = true
+            state.stopped = true
         end
         return state.stopped
     end
 
     local chunkIndexes = {}
+    local serviceSnapshots = {}
 
     local function asciiFallback(value)
         -- Preserve UTF-8 bytes reversibly when an executor's JSON encoder
@@ -551,8 +594,12 @@ function Exporter.capture(options, onProgress, control)
         return true
     end
 
-    local function scan(serviceName, pass)
+    local function scan(serviceName, pass, mode)
         if stopCheck() then return end
+        local deltaMode = cfg.continuous and mode == "delta"
+        local baselineMode = cfg.continuous and mode ~= "delta" and serviceName ~= "Workspace"
+        local previousSnapshot = serviceSnapshots[serviceName] or {}
+        local currentSnapshot = deltaMode and {} or (baselineMode and {} or nil)
         local root = rootInstance(serviceName)
         if not root then
             partial("missing_root:" .. serviceName)
@@ -600,10 +647,32 @@ function Exporter.capture(options, onProgress, control)
                     state.currentPath = frame.path
                     state.currentClass = class
                     local properties = collectProperties(obj, cfg, state)
-                    table.insert(records, {
+                    local record = {
                         name = name, className = class, path = frame.path,
                         parentPath = frame.parent, depth = frame.depth, properties = properties,
-                    })
+                    }
+                    if deltaMode or baselineMode then
+                        local signature = recordFingerprint(record)
+                        currentSnapshot[record.path] = {
+                            signature = signature, name = name, className = class,
+                            path = record.path, parentPath = record.parentPath, depth = record.depth,
+                        }
+                        local previous = previousSnapshot[record.path]
+                        if deltaMode then
+                            if not previous or previous.signature ~= signature then
+                                record.operation = previous and "update" or "add"
+                                record.observedAtUtc = os.date("!%Y-%m-%dT%H:%M:%SZ")
+                                table.insert(records, record)
+                                state.deltaRecords = state.deltaRecords + 1
+                                if previous then state.updated = state.updated + 1
+                                else state.added = state.added + 1 end
+                            end
+                        else
+                            table.insert(records, record)
+                        end
+                    else
+                        table.insert(records, record)
+                    end
                     state.classes[class] = (state.classes[class] or 0) + 1
                     if #records >= cfg.chunkSize then
                         if not flush(records, serviceName, pass) then
@@ -652,9 +721,38 @@ function Exporter.capture(options, onProgress, control)
             end
         end
 
-        -- A manual cancellation still preserves pending buffered records.
-        if #records > 0 and (not state.stopped or state.cancelled) then
+        -- Tombstones make removals explicit: an analyzer can reconstruct
+        -- GUI state without comparing full repeated snapshots.
+        if deltaMode and not state.stopped then
+            local inspected = 0
+            for path, old in pairs(previousSnapshot) do
+                if stopCheck() then break end
+                if currentSnapshot[path] == nil then
+                    table.insert(records, {
+                        operation = "remove", observedAtUtc = os.date("!%Y-%m-%dT%H:%M:%SZ"),
+                        name = old.name, className = old.className,
+                        path = old.path, parentPath = old.parentPath,
+                        depth = old.depth, properties = {},
+                    })
+                    state.deltaRecords = state.deltaRecords + 1
+                    state.removed = state.removed + 1
+                    if #records >= cfg.chunkSize then
+                        if not flush(records, serviceName, pass) then
+                            state.stopped = true; break
+                        end
+                        records = {}
+                    end
+                end
+                inspected = inspected + 1
+                if inspected % cfg.yieldEvery == 0 then task.wait() end
+            end
+        end
+        -- Stop preserves all records already buffered.
+        if #records > 0 and (not state.stopped or state.cancelled or state.stopRequested) then
             if not flush(records, serviceName, pass) then state.stopped = true end
+        end
+        if currentSnapshot and not state.stopped then
+            serviceSnapshots[serviceName] = currentSnapshot
         end
         state.pending = 0
         notify(onProgress, "service_done", state, serviceName)
@@ -675,7 +773,7 @@ function Exporter.capture(options, onProgress, control)
         if ok and streaming then partial("workspace_streaming_enabled") end
     end
 
-    if cfg.twoPassGui and not state.stopped
+    if not cfg.continuous and cfg.twoPassGui and not state.stopped
         and (cfg.targets.PlayerGui or cfg.targets.StarterGui) then
         for pass = 2, cfg.guiPasses do
             notify(onProgress, "waiting_gui_pass", state, "PlayerGui")
@@ -688,6 +786,270 @@ function Exporter.capture(options, onProgress, control)
             end
             if state.stopped then break end
         end
+    end
+
+    -- A provisional manifest makes long-running sessions inspectable and
+    -- recoverable even if Roblox/executor exits without an orderly Stop.
+    local function checkpoint()
+        local payload = {
+            schemaVersion = Exporter.SCHEMA_VERSION,
+            exporterVersion = Exporter.VERSION, clientOnly = true,
+            status = "recording", captureMode = "continuous",
+            capturedAtUtc = os.date("!%Y-%m-%dT%H:%M:%SZ"),
+            game = {
+                label = sanitizedString(cfg.label, cfg, state),
+                category = sanitizedString(cfg.category, cfg, state),
+                variant = sanitizedString(cfg.variant, cfg, state),
+                placeId = game.PlaceId, gameId = game.GameId,
+            },
+            stats = {
+                visited = state.visited, written = state.written, files = state.fileCount,
+                bytes = state.bytes, assetReferences = state.assetReferences,
+                classCounts = state.classes, redactions = state.redactions,
+                errors = state.errorCount, elapsedSeconds = os.clock() - state.startedAt,
+                monitorCycles = state.monitorCycles, deltaRecords = state.deltaRecords,
+                added = state.added, updated = state.updated, removed = state.removed,
+            },
+            services = state.services,
+            errors = state.errors,
+            partialReasons = {},
+            settings = {format = cfg.format, chunkSize = cfg.chunkSize,
+                continuous = true, continuousInterval = cfg.continuousInterval,
+                captureMode = "continuous", targets = cfg.targets},
+        }
+        local ok, encoded = pcall(function() return HttpService:JSONEncode(payload) end)
+        if not ok or not pcall(writefile, base .. "/manifest.json", encoded) then
+            partial("checkpoint_write_failed")
+            addError(state, "checkpoint_write_failed")
+        end
+    end
+
+    local monitorConnections = {}
+    local watchedRoots = {}
+    local events = {}
+    local eventHead = 1
+    local eventTail = 0
+
+    local function disconnectMonitoring()
+        for _, connection in ipairs(monitorConnections) do
+            pcall(function() connection:Disconnect() end)
+        end
+        table.clear(monitorConnections)
+    end
+
+    local function pathFor(instance, service, root)
+        local names, depth = {}, 0
+        local obj = instance
+        local seenParents = {}
+        while obj and obj ~= root do
+            if seenParents[obj] then return nil end
+            seenParents[obj] = true
+            if state.characters[obj] or isForbidden(obj, service, state) then return nil end
+            names[#names + 1] = readName(obj, cfg, state):gsub("[./\\]", "_")
+            local okParent, parent = pcall(function() return obj.Parent end)
+            if not okParent then return nil end
+            obj = parent
+            depth = depth + 1
+        end
+        if obj ~= root then return nil end
+        local parts = {service}
+        for i = #names, 1, -1 do parts[#parts + 1] = names[i] end
+        local path = table.concat(parts, "/")
+        local parentPath = #parts > 1 and table.concat(parts, "/", 1, #parts - 1) or ""
+        return path, parentPath, depth
+    end
+
+    local function enqueue(service, root, instance, operation)
+        local path, parent, depth = pathFor(instance, service, root)
+        if not path then return end
+        eventTail = eventTail + 1
+        events[eventTail] = {
+            instance = instance, service = service, operation = operation,
+            path = path, parentPath = parent, depth = depth,
+            at = os.date("!%Y-%m-%dT%H:%M:%SZ"),
+        }
+    end
+
+    local function attachListeners()
+        for _, service in ipairs(Exporter.TARGETS) do
+            if cfg.targets[service] and not watchedRoots[service] then
+                local root = rootInstance(service)
+                if root and root.DescendantAdded and root.DescendantRemoving then
+                    local okAdded, added = pcall(function()
+                        return root.DescendantAdded:Connect(function(obj)
+                            enqueue(service, root, obj, "add")
+                        end)
+                    end)
+                    local okRemoved, removed = pcall(function()
+                        return root.DescendantRemoving:Connect(function(obj)
+                            enqueue(service, root, obj, "remove")
+                        end)
+                    end)
+                    if okAdded and okRemoved then
+                        watchedRoots[service] = root
+                        monitorConnections[#monitorConnections + 1] = added
+                        monitorConnections[#monitorConnections + 1] = removed
+                    else
+                        if okAdded then added:Disconnect() end
+                        if okRemoved then removed:Disconnect() end
+                        partial("event_monitor_unavailable:" .. service)
+                    end
+                end
+            end
+        end
+    end
+
+    local function processEvents(drain)
+        local perService = {}
+        local steps = 0
+        while eventHead <= eventTail and (drain or not stopCheck()) do
+            local event = events[eventHead]
+            events[eventHead] = nil
+            eventHead = eventHead + 1
+            if event then
+                local classOk, class = pcall(function() return event.instance.ClassName end)
+                if not classOk then class = "Unknown" end
+                local name = event.path:match("([^/]+)$") or "Unknown"
+                local props = {}
+                if event.operation == "add" then
+                    props = collectProperties(event.instance, cfg, state)
+                end
+                local record = {
+                    operation = event.operation,
+                    observedAtUtc = event.at,
+                    name = name, className = class, depth = event.depth,
+                    path = event.path, parentPath = event.parentPath,
+                    properties = props,
+                }
+                local snapshot = serviceSnapshots[event.service]
+                local old = snapshot and snapshot[event.path]
+                if event.operation == "remove" then
+                    if snapshot then snapshot[event.path] = nil end
+                    state.removed = state.removed + 1
+                else
+                    if old then
+                        record.operation = "update"
+                        state.updated = state.updated + 1
+                    else
+                        state.added = state.added + 1
+                    end
+                    if snapshot then
+                        snapshot[event.path] = {
+                            signature = recordFingerprint(record),
+                            name = name, className = class, path = event.path,
+                            parentPath = event.parentPath, depth = event.depth,
+                        }
+                    end
+                end
+                state.deltaRecords = state.deltaRecords + 1
+                state.visited = state.visited + 1
+                state.discovered = state.discovered + 1
+                state.currentService = event.service
+                state.currentPath = event.path
+                state.currentClass = class
+                state.currentPass = 2
+                state.classes[class] = (state.classes[class] or 0) + 1
+                local serviceStats = state.services[event.service]
+                if serviceStats then
+                    serviceStats.visited = serviceStats.visited + 1
+                    serviceStats.passes = math.max(serviceStats.passes, 2)
+                    local bucket = perService[event.service]
+                    if not bucket then bucket = {}; perService[event.service] = bucket end
+                    bucket[#bucket + 1] = record
+                    if #bucket >= cfg.chunkSize then
+                        if not flush(bucket, event.service, 2) then
+                            state.stopped = true
+                            break
+                        end
+                        perService[event.service] = {}
+                    end
+                end
+            end
+            steps = steps + 1
+            if steps % cfg.yieldEvery == 0 then
+                notify(onProgress, "monitoring", state)
+                task.wait()
+            end
+        end
+        -- Empty the queue only after all currently queued items were read.
+        if eventHead > eventTail then
+            events = {}; eventHead = 1; eventTail = 0
+        end
+        -- Flush small batches too: a menu may be opened only briefly.
+        for service, bucket in pairs(perService) do
+            if #bucket > 0 and not flush(bucket, service, 2) then state.stopped = true end
+        end
+    end
+
+    if cfg.continuous and not state.stopped and selected > 0 then
+        -- Event handlers capture transient additions/removals (including Workspace);
+        -- periodic delta rescans catch changes to already-existing GUI text/visibility.
+        local okMonitor, monitorError = pcall(function()
+            attachListeners()
+            checkpoint()
+            state.monitoring = true
+            notify(onProgress, "monitoring_start", state)
+            local lastSharedScan = os.clock()
+            local cyclePass = 1
+            while not stopCheck() do
+                local deadline = os.clock() + cfg.continuousInterval
+                while os.clock() < deadline and not stopCheck() do
+                    processEvents()
+                    task.wait(0.15)
+                end
+                if stopCheck() then break end
+                attachListeners()
+                processEvents()
+                cyclePass = cyclePass + 1
+                state.monitorCycles = state.monitorCycles + 1
+                for _, service in ipairs({"PlayerGui", "StarterGui"}) do
+                    if cfg.targets[service] then scan(service, cyclePass, "delta") end
+                    if state.stopped then break end
+                end
+                if state.stopped then break end
+                -- Less frequent structural refresh. Workspace is event-driven
+                -- because polling hundreds of thousands of map parts is wasteful.
+                if os.clock() - lastSharedScan >= math.max(15, cfg.continuousInterval * 5) then
+                    lastSharedScan = os.clock()
+                    for _, service in ipairs(Exporter.TARGETS) do
+                        if cfg.targets[service] and service ~= "PlayerGui"
+                            and service ~= "StarterGui" and service ~= "Workspace" then
+                            scan(service, cyclePass, "delta")
+                        end
+                        if state.stopped then break end
+                    end
+                end
+                if state.stopped then break end
+                if state.monitorCycles % 3 == 0 then checkpoint() end
+                notify(onProgress, "monitoring", state)
+            end
+            disconnectMonitoring()
+            processEvents(true)
+            if state.stopRequested and not state.cancelled
+                and (cfg.targets.PlayerGui or cfg.targets.StarterGui) then
+                -- One last sweep catches the GUI state at the instant Stop
+                -- was pressed, even if the scheduled interval was not due.
+                -- Do not mistake this deliberate last sweep for a background loop.
+                notify(onProgress, "monitoring_finalizing", state)
+                control.stopRequested = false
+                state.stopped = false
+                cyclePass = cyclePass + 1
+                for _, service in ipairs({"PlayerGui", "StarterGui"}) do
+                    if cfg.targets[service] then scan(service, cyclePass, "delta") end
+                    if state.stopped then break end
+                end
+                control.stopRequested = true
+                state.stopped = true
+            end
+        end)
+        state.monitoring = false
+        disconnectMonitoring()
+        if not okMonitor then
+            partial("monitoring_error")
+            addError(state, "monitoring_error:" .. tostring(monitorError):sub(1, 130))
+            state.stopped = true
+        end
+        notify(onProgress, "monitoring_stopped", state)
     end
 
     if state.errorCount > 0 then partial("read_or_write_errors") end
@@ -705,13 +1067,18 @@ function Exporter.capture(options, onProgress, control)
             placeId = game.PlaceId, gameId = game.GameId,
         },
         capturedAtUtc = os.date("!%Y-%m-%dT%H:%M:%SZ"),
-        status = state.cancelled and "cancelled" or (#reasons > 0 and "partial" or "complete"),
+        status = state.cancelled and "cancelled" or
+            (state.stopRequested and "stopped" or (#reasons > 0 and "partial" or "complete")),
+        endedReason = state.cancelled and "cancelled" or
+            (state.stopRequested and "user_stopped" or "finished"),
         partialReasons = reasons,
         stats = {
             visited = state.visited, written = state.written, files = state.fileCount,
             bytes = state.bytes, redactions = state.redactions, errors = state.errorCount,
             assetReferences = state.assetReferences, classCounts = state.classes,
             elapsedSeconds = os.clock() - state.startedAt,
+            monitorCycles = state.monitorCycles, deltaRecords = state.deltaRecords,
+            added = state.added, updated = state.updated, removed = state.removed,
         },
         services = state.services,
         errors = state.errors,
@@ -722,7 +1089,8 @@ function Exporter.capture(options, onProgress, control)
             stringValues = cfg.stringValues, twoPassGui = cfg.twoPassGui,
             guiPasses = cfg.guiPasses, secondPassDelay = cfg.secondPassDelay,
             chunkSize = cfg.chunkSize, yieldEvery = cfg.yieldEvery,
-            captureMode = "exhaustive",
+            continuous = cfg.continuous, continuousInterval = cfg.continuousInterval,
+            captureMode = cfg.continuous and "continuous" or "exhaustive",
         },
         privacy = {
             excludesOtherPlayerCharacters = true,
@@ -737,6 +1105,9 @@ function Exporter.capture(options, onProgress, control)
             "StreamingEnabled can result in missing Workspace descendants.",
             "No global node, depth, total byte, or string-length limit is applied.",
             "GUI snapshots are not merged; lazy menus must be opened by the operator.",
+            "Continuous mode: pass 1 is a full snapshot; later records have operations add/update/remove.",
+            "Workspace changes are captured through client DescendantAdded/DescendantRemoving events.",
+            "GUI properties are refreshed periodically and unchanged records are not rewritten.",
             "Asset references are exported as property values; binary assets are not downloaded.",
             "Paths and GUI strings can still contain contextual data; review before publishing.",
             "IDs, volatile paths and dynamic player fields must not be used in detection signatures.",
@@ -776,13 +1147,16 @@ local LANGUAGE_FILE = "LesbhubExporter/language.txt"
 local PRESETS = {
     max = {guiTexts = true, guiProperties = true, worldProperties = true, assets = true,
         textboxValues = true, stringValues = true, twoPassGui = true,
-        guiPasses = 4, secondPassDelay = 7, yieldEvery = 45, chunkSize = 200},
+        guiPasses = 4, secondPassDelay = 7, continuousInterval = 3,
+        yieldEvery = 45, chunkSize = 200},
     smart = {guiTexts = true, guiProperties = true, worldProperties = true, assets = true,
         textboxValues = true, stringValues = true, twoPassGui = true,
-        guiPasses = 3, secondPassDelay = 6, yieldEvery = 80, chunkSize = 300},
+        guiPasses = 3, secondPassDelay = 6, continuousInterval = 4,
+        yieldEvery = 80, chunkSize = 300},
     fast = {guiTexts = true, guiProperties = false, worldProperties = false, assets = true,
         textboxValues = true, stringValues = true, twoPassGui = true,
-        guiPasses = 2, secondPassDelay = 3, yieldEvery = 140, chunkSize = 500},
+        guiPasses = 2, secondPassDelay = 3, continuousInterval = 6,
+        yieldEvery = 140, chunkSize = 500},
 }
 
 -- All visible strings are routed through this dictionary. Names of Roblox
@@ -791,6 +1165,31 @@ local WORDS = {
     home = {"Home", "Accueil"}, dataset = {"Dataset", "Données"},
     targets = {"Targets", "Cibles"}, options = {"Options", "Options"},
     capture = {"Capture", "Capture"}, map = {"Map", "Carte"},
+    continuous = {"Start continuous capture", "Démarrer la capture continue"},
+    continuous_desc = {"Full snapshot, then monitor new objects and GUI changes until Stop & Save.",
+        "Capture initiale complète, puis surveillance des nouveaux objets et des changements GUI jusqu'à Arrêter."},
+    continuous_help = {"Interact with the game while monitoring runs. Only changes are saved after the first scan.",
+        "Interagis avec le jeu pendant la surveillance. Seules les modifications sont écrites après le premier scan."},
+    continuous_interval = {"GUI check interval (seconds)", "Intervalle GUI (secondes)"},
+    stop_save = {"Stop & Save", "Arrêter et sauvegarder"},
+    stop_save_desc = {"Stops continuous monitoring and finalizes its manifest without deleting data.",
+        "Arrête la surveillance et finalise le manifeste sans effacer les données."},
+    stop_requested = {"Finalizing: saving remaining changes and writing the manifest...",
+        "Finalisation : sauvegarde des derniers changements et écriture du manifeste..."},
+    stop_unavailable = {"No continuous capture is running.", "Aucune capture continue n'est en cours."},
+    continuous_consent = {"Continuous mode monitors client objects and interfaces until you stop it; local files may grow.",
+        "Le mode continu surveille les objets et interfaces jusqu'à ton arrêt ; les fichiers locaux peuvent grossir."},
+    stopped = {"Stopped and saved", "Arrêté et sauvegardé"},
+    monitor_started = {"Watching changes — explore the game at your own pace.",
+        "Surveillance active — explore le jeu à ton rythme."},
+    monitor_finalizing = {"Taking the final GUI snapshot", "Dernière capture GUI"},
+    monitor_cycles = {"Checks", "Vérifications"},
+    monitor_deltas = {"Changes saved", "Modifications enregistrées"},
+    monitoring_status = {"Monitoring active", "Surveillance active"},
+    action_group = {"Capture actions", "Actions de capture"},
+    open_any_interface = {"Open any game menu or interact with the interface before the next snapshot (%d s).",
+        "Ouvre n'importe quel menu ou interagis avec l'interface avant la prochaine capture (%d s)."},
+
     settings = {"Settings", "Paramètres"},
     welcome = {"Welcome to Lesbhub Exporter", "Bienvenue dans Lesbhub Exporter"},
     welcome_desc = {"Inspect the Roblox client in one guided export. Choose a preset, then start. No API upload.",
@@ -868,8 +1267,8 @@ local WORDS = {
     unlimited_desc = {"Chunking controls file sizes only; the overall dataset is not capped.",
         "Le découpage limite les fichiers individuels, jamais le volume total exporté."},
     capture_intro = {"One-click capture", "Capture en un clic"},
-    capture_desc = {"Full export already includes GUI. The activity window opens automatically and remains accessible from every tab.",
-        "L'export complet inclut déjà les GUI. Le journal s'ouvre automatiquement et reste accessible depuis tous les onglets."},
+    capture_desc = {"Choose a one-time full export or continuous monitoring. The activity window opens for every mode.",
+        "Choisis un export complet ponctuel ou une surveillance continue. Le journal s'ouvre dans chaque mode."},
     ready = {"Ready", "Prêt"},
     ready_desc = {"The exact object total is not known before the scan.", "Le nombre final d'objets est inconnu avant le scan."},
     last_export = {"Last export", "Dernier export"},
@@ -934,8 +1333,8 @@ local WORDS = {
     scanning = {"Scanning...", "Analyse en cours..."},
     waiting = {"Waiting for next GUI snapshot", "Attente de la prochaine capture GUI"},
     progress_unknown = {"Scanning • final total unknown", "Analyse • total final inconnu"},
-    open_menu = {"Open %s for the next GUI pass (%d s).", "Ouvre %s avant la prochaine passe GUI (%d s)."},
-    next_other = {"another menu", "un autre menu"},
+    open_menu = {"Interact with the game's interface before the next snapshot (%d s).",
+        "Interagis avec l'interface du jeu avant la prochaine capture (%d s)."},
     missing_root = {"Unavailable service: %s", "Service inaccessible : %s"},
     event_scan = {"Scanning %s (pass %d)", "Analyse %s (passe %d)"},
     event_done = {"Finished %s: %s visited", "Fin %s : %s visités"},
@@ -1222,6 +1621,7 @@ function UI.open(Engine, restore)
     end
     local presetKey = restore.preset or "max"
     local running, control, destroyed, nativeBusy = false, nil, false, false
+    local runningMode = nil
 
     local Window = windui:CreateWindow({
         Title = "Lesbhub Exporter", Folder = "lesbhub-exporter", Icon = "database",
@@ -1266,7 +1666,13 @@ function UI.open(Engine, restore)
     homeSummary = home:Paragraph({Title = t("home_status"), Desc = t("home_no_capture")})
     home:Section({Title = t("quick_actions")})
     home:Button({Title = t("full"), Icon = "download",
+        Color = Color3.fromRGB(48, 109, 204), Size = "Large",
+        Justify = "Center", IconAlign = "Left",
         Callback = function() if confirmCapture then confirmCapture("full") end end})
+    home:Button({Title = t("continuous"), Icon = "radio-tower",
+        Color = Color3.fromRGB(33, 129, 103), Size = "Large",
+        Justify = "Center", IconAlign = "Left",
+        Callback = function() if confirmCapture then confirmCapture("continuous") end end})
     home:Button({Title = t("quick_gui"), Icon = "monitor",
         Callback = function() if confirmCapture then confirmCapture("gui") end end})
     home:Button({Title = t("quick_map"), Icon = "map",
@@ -1401,6 +1807,7 @@ function UI.open(Engine, restore)
     addToggle("twoPassGui", "gui_passes_enabled", "gui_passes_desc")
     addSlider("guiPasses", "pass_count", 2, 8, 1)
     addSlider("secondPassDelay", "pass_wait", 2, 25, 1)
+    addSlider("continuousInterval", "continuous_interval", 1, 20, 1)
     addSlider("yieldEvery", "yield", 10, 250, 10)
     addSlider("chunkSize", "chunk", 25, 800, 25)
     advanced:Paragraph({Title = t("unlimited"), Desc = t("unlimited_desc")})
@@ -1422,15 +1829,41 @@ function UI.open(Engine, restore)
     end
 
     capture:Paragraph({Title = t("capture_intro"), Desc = t("capture_desc")})
+    capture:Paragraph({Title = t("action_group"), Desc = t("continuous_help")})
     local captureStatus = capture:Paragraph({Title = t("ready"), Desc = t("ready_desc")})
     captureSummary = capture:Paragraph({Title = t("last_export"), Desc = t("no_export")})
-    capture:Button({Title = t("full"), Icon = "download",
-        Callback = function() if confirmCapture then confirmCapture("full") end end})
+    capture:Button({
+        Title = t("full"), Icon = "download",
+        Color = Color3.fromRGB(48, 109, 204), Size = "Large",
+        Justify = "Center", IconAlign = "Left",
+        Callback = function() if confirmCapture then confirmCapture("full") end end,
+    })
+    capture:Button({
+        Title = t("continuous"), Icon = "radio-tower",
+        Color = Color3.fromRGB(33, 129, 103), Size = "Large",
+        Justify = "Center", IconAlign = "Left",
+        Callback = function() if confirmCapture then confirmCapture("continuous") end end,
+    })
+    capture:Button({
+        Title = t("stop_save"), Desc = t("stop_save_desc"), Icon = "save",
+        Color = Color3.fromRGB(179, 117, 34), Size = "Large",
+        Justify = "Center", IconAlign = "Left",
+        Callback = function()
+            if running and runningMode == "continuous" and control then
+                control.stopRequested = true
+                alert(t("stop_save"), t("stop_requested"))
+            else
+                alert(t("stop_save"), t("stop_unavailable"))
+            end
+        end,
+    })
     capture:Button({Title = t("quick_gui"), Icon = "monitor",
+        Color = Color3.fromRGB(61, 67, 76),
         Callback = function() if confirmCapture then confirmCapture("gui") end end})
     capture:Button({Title = t("open_journal"), Desc = t("open_journal_desc"),
-        Icon = "scroll-text", Callback = journal.show})
+        Icon = "scroll-text", Color = Color3.fromRGB(61, 67, 76), Callback = journal.show})
     capture:Button({Title = t("cancel"), Icon = "square",
+        Color = Color3.fromRGB(119, 48, 53),
         Callback = function()
             if running and control then control.cancelled = true; alert(t("cancel"), t("cancelled")) end
         end})
@@ -1532,15 +1965,17 @@ function UI.open(Engine, restore)
             runConfig.targets = {Workspace = true, Lighting = true, SoundService = true}
             runConfig.twoPassGui = false
             runConfig.variant = tostring(config.variant) .. "-map"
-        elseif mode == "full" then
-            -- Full export always includes a GUI snapshot as advertised.
+        elseif mode == "full" or mode == "continuous" then
+            -- Both full modes always include the standard client GUI roots.
             runConfig.targets.PlayerGui = true
             runConfig.targets.StarterGui = true
+            runConfig.continuous = mode == "continuous"
         end
         if not next(runConfig.targets) then alert(t("capture"), t("empty_targets")); return end
 
         running = true
-        control = {cancelled = false}
+        runningMode = mode
+        control = {cancelled = false, stopRequested = false}
         local runControl = control
         local events, lastDraw = {}, -math.huge
         local stageNames = {}
@@ -1580,7 +2015,9 @@ function UI.open(Engine, restore)
             for _, value in ipairs(events) do textLines[#textLines + 1] = value end
             journal.setText(table.concat(textLines, "\n"))
         end
-        event(tf("event_start", mode == "full" and t("full") or mode == "gui" and t("quick_gui") or t("map_json")))
+        event(tf("event_start", mode == "continuous" and t("continuous")
+            or mode == "full" and t("full")
+            or mode == "gui" and t("quick_gui") or t("map_json")))
         task.spawn(function()
             local ok, result, err = pcall(Engine.capture, runConfig, function(info)
                 if destroyed then return end
@@ -1592,16 +2029,22 @@ function UI.open(Engine, restore)
                 elseif info.stage == "file_written" then
                     if (info.files or 0) % 25 == 0 then event(tf("event_written", shortCount(info.files))) end
                 elseif info.stage == "waiting_gui_pass" then
-                    local pass = (tonumber(info.pass) or 1) + 1
-                    local menu = pass == 2 and "STORE" or (pass == 3 and "SKINS" or t("next_other"))
-                    event(tf("open_menu", menu, runConfig.secondPassDelay))
-                    alert(t("waiting"), tf("open_menu", menu, runConfig.secondPassDelay))
+                    local message = tf("open_menu", runConfig.secondPassDelay)
+                    event(message)
+                    alert(t("waiting"), message)
+                elseif info.stage == "monitoring_start" then
+                    event(t("monitor_started"))
+                    pcall(function() captureStatus:SetTitle(t("monitoring_status")) end)
+                elseif info.stage == "monitoring_finalizing" then
+                    event(t("monitor_finalizing"))
+                elseif info.stage == "monitoring_stopped" then
+                    event(t("stop_requested"))
                 elseif info.stage == "missing_root" then
                     event(tf("missing_root", tostring(info.service)))
                 end
                 draw(info, info.stage ~= "scanning")
             end, runControl)
-            running, control = false, nil
+            running, control, runningMode = false, nil, nil
             journal.setActive(false)
             if destroyed then return end
             if not ok or not result then
@@ -1614,10 +2057,15 @@ function UI.open(Engine, restore)
             else
                 local manifest = result.manifest
                 local statusLabel = t(manifest.status == "complete" and "completed"
+                    or manifest.status == "stopped" and "stopped"
                     or manifest.status == "cancelled" and "cancelled_status" or "partial")
                 local summary = tf("brief_line",
                     shortCount(manifest.stats.written), shortCount(manifest.stats.files),
                     shortCount(manifest.stats.assetReferences), manifest.stats.elapsedSeconds or 0)
+                if manifest.settings and manifest.settings.continuous then
+                    summary = summary .. "  |  " .. t("monitor_deltas") .. ": "
+                        .. shortCount(manifest.stats.deltaRecords or 0)
+                end
                 event(tf("event_end", summary))
                 if type(manifest.partialReasons) == "table" and #manifest.partialReasons > 0 then
                     event("Notes: " .. table.concat(manifest.partialReasons, ", "))
@@ -1641,12 +2089,14 @@ function UI.open(Engine, restore)
     confirmCapture = function(mode)
         if destroyed or running then return end
         local kind = mode == "full" and t("full")
+            or mode == "continuous" and t("continuous")
             or (mode == "gui" and t("quick_gui") or t("map_json"))
         Window:Dialog({
             Title = t("confirm_export") .. " • " .. kind, Width = 390,
             Content = t("data_local") .. "\n\n"
                 .. ((config.textboxValues or config.stringValues) and t("data_risk") or t("data_safer"))
-                .. "\n\n" .. t("do_not_publish") .. "\n\n" .. t("no_upload"),
+                .. "\n\n" .. (mode == "continuous" and (t("continuous_consent") .. "\n\n") or "")
+                .. t("do_not_publish") .. "\n\n" .. t("no_upload"),
             Buttons = {
                 {Title = t("back"), Variant = "Secondary", Callback = function() end},
                 {Title = t("start"), Variant = "Primary", Callback = function() startCapture(mode) end},
