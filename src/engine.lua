@@ -335,7 +335,7 @@ local function encodeChunk(records, format, service, pass)
         for _, record in ipairs(records) do
             local encoded = HttpService:JSONEncode(record)
             -- Roblox encodes an empty Lua table as [] instead of {}.
-            table.insert(lines, encoded:gsub('"properties":%[%]', '"properties":{}'))
+            table.insert(lines, (encoded:gsub('"properties":%[%]', '"properties":{}')))
         end
         return table.concat(lines, "\n") .. "\n"
     end
@@ -354,7 +354,7 @@ local function encodeChunk(records, format, service, pass)
         schemaVersion = Exporter.SCHEMA_VERSION,
         service = service, pass = pass, records = records,
     })
-    return encoded:gsub('"properties":%[%]', '"properties":{}')
+    return (encoded:gsub('"properties":%[%]', '"properties":{}'))
 end
 
 local function normalizedConfig(input)
