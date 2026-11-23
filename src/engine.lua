@@ -836,14 +836,16 @@ function Exporter.capture(options, onProgress, control)
     local function pathFor(instance, service, root)
         local names, depth = {}, 0
         local obj = instance
+        local seenParents = {}
         while obj and obj ~= root do
+            if seenParents[obj] then return nil end
+            seenParents[obj] = true
             if state.characters[obj] or isForbidden(obj, service, state) then return nil end
             names[#names + 1] = readName(obj, cfg, state):gsub("[./\\]", "_")
             local okParent, parent = pcall(function() return obj.Parent end)
             if not okParent then return nil end
             obj = parent
             depth = depth + 1
-            if depth > 400 then return nil end -- parent-chain guard, not a scan depth cap
         end
         if obj ~= root then return nil end
         local parts = {service}
