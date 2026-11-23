@@ -5,7 +5,7 @@ local function loadEngine()
 -- Lesbhub Exporter V1 - client-side, read-only capture engine.
 -- No script source, remote invocation, executor introspection, or network upload.
 local Exporter = {}
-Exporter.VERSION = "0.5.0"
+Exporter.VERSION = "0.5.1"
 Exporter.SCHEMA_VERSION = 1
 Exporter.TARGETS = {
     "ReplicatedStorage", "ReplicatedFirst", "StarterGui", "PlayerGui",
@@ -1626,6 +1626,9 @@ function UI.open(Engine, restore)
     local Window = windui:CreateWindow({
         Title = "Lesbhub Exporter", Folder = "lesbhub-exporter", Icon = "database",
         NewElements = true, HideSearchBar = true,
+        -- The exporter does not need a Roblox profile/thumbnail.
+        -- Avoid the optional user widget reading LocalPlayer during startup.
+        User = {Enabled = false, Anonymous = true},
         OpenButton = {Enabled = true, Title = "Lesbhub Exporter"},
     })
     local function alert(title, message)
