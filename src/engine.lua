@@ -1,7 +1,7 @@
 -- Lesbhub Exporter V1 - client-side, read-only capture engine.
 -- No script source, remote invocation, executor introspection, or network upload.
 local Exporter = {}
-Exporter.VERSION = "0.4.0"
+Exporter.VERSION = "0.5.0"
 Exporter.SCHEMA_VERSION = 1
 Exporter.TARGETS = {
     "ReplicatedStorage", "ReplicatedFirst", "StarterGui", "PlayerGui",
@@ -396,6 +396,10 @@ local function normalizedConfig(input)
     cfg.textboxValues = input.textboxValues == true
     cfg.stringValues = input.stringValues == true
     cfg.twoPassGui = input.twoPassGui == true
+    cfg.continuous = input.continuous == true
+    -- Continuous monitoring continues until an explicit stop/cancel.
+    -- The interval is a cadence, NOT a dataset or duration cap.
+    cfg.continuousInterval = clamp(input.continuousInterval, 1, 30, 3)
     cfg.guiPasses = clamp(input.guiPasses, 2, 12, 3)
     cfg.secondPassDelay = clamp(input.secondPassDelay, 1, 30, 6)
     -- Chunk size and yield cadence bound *per-step* work, not the exported dataset.
@@ -415,9 +419,41 @@ local function notify(callback, stage, state, extra)
             discovered = state.discovered, pending = state.pending,
             currentPath = state.currentPath, currentClass = state.currentClass,
             assetReferences = state.assetReferences,
+            monitoring = state.monitoring or false,
+            monitorCycles = state.monitorCycles or 0,
+            deltaRecords = state.deltaRecords or 0,
+            added = state.added or 0,
+            updated = state.updated or 0,
+            removed = state.removed or 0,
             elapsedSeconds = os.clock() - state.startedAt,
         })
     end
+end
+
+-- Stable, order-independent fingerprint for selected public/allowlisted fields.
+-- It is deliberately independent of JSON object-key iteration order.
+local function stableValue(value, depth)
+    if depth > 7 then return "<depth>" end
+    if type(value) ~= "table" then return type(value) .. ":" .. tostring(value) end
+    local keys = {}
+    for key in pairs(value) do keys[#keys + 1] = key end
+    table.sort(keys, function(a, b)
+        if type(a) ~= type(b) then return type(a) < type(b) end
+        return tostring(a) < tostring(b)
+    end)
+    local parts = {"{"}
+    for _, key in ipairs(keys) do
+        parts[#parts + 1] = tostring(key)
+        parts[#parts + 1] = "="
+        parts[#parts + 1] = stableValue(value[key], depth + 1)
+        parts[#parts + 1] = ";"
+    end
+    parts[#parts + 1] = "}"
+    return table.concat(parts)
+end
+
+local function recordFingerprint(record)
+    return tostring(record.className) .. "|" .. stableValue(record.properties or {}, 0)
 end
 
 function Exporter.capture(options, onProgress, control)
@@ -440,6 +476,8 @@ function Exporter.capture(options, onProgress, control)
         currentService = "", currentPass = 1, startedAt = os.clock(),
         errors = {}, errorCount = 0, partialReasons = {}, services = {},
         classes = {}, cancelled = false, stopped = false,
+        stopRequested = false, monitoring = false, monitorCycles = 0,
+        deltaRecords = 0, added = 0, updated = 0, removed = 0,
     }
     local function partial(reason)
         if not state.partialReasons[reason] then state.partialReasons[reason] = true end
@@ -449,11 +487,16 @@ function Exporter.capture(options, onProgress, control)
             state.cancelled = true
             state.stopped = true
             partial("user_cancelled")
+        elseif cfg.continuous and control.stopRequested then
+            -- Expected user action, not an error or a failed capture.
+            state.stopRequested = true
+            state.stopped = true
         end
         return state.stopped
     end
 
     local chunkIndexes = {}
+    local guiSnapshots = {}
 
     local function asciiFallback(value)
         -- Preserve UTF-8 bytes reversibly when an executor's JSON encoder
@@ -547,8 +590,13 @@ function Exporter.capture(options, onProgress, control)
         return true
     end
 
-    local function scan(serviceName, pass)
+    local function scan(serviceName, pass, mode)
         if stopCheck() then return end
+        local deltaMode = cfg.continuous and mode == "delta"
+        local baselineMode = cfg.continuous and mode ~= "delta"
+            and (serviceName == "PlayerGui" or serviceName == "StarterGui")
+        local previousSnapshot = guiSnapshots[serviceName] or {}
+        local currentSnapshot = deltaMode and {} or (baselineMode and {} or nil)
         local root = rootInstance(serviceName)
         if not root then
             partial("missing_root:" .. serviceName)
@@ -596,10 +644,32 @@ function Exporter.capture(options, onProgress, control)
                     state.currentPath = frame.path
                     state.currentClass = class
                     local properties = collectProperties(obj, cfg, state)
-                    table.insert(records, {
+                    local record = {
                         name = name, className = class, path = frame.path,
                         parentPath = frame.parent, depth = frame.depth, properties = properties,
-                    })
+                    }
+                    if deltaMode or baselineMode then
+                        local signature = recordFingerprint(record)
+                        currentSnapshot[record.path] = {
+                            signature = signature, name = name, className = class,
+                            path = record.path, parentPath = record.parentPath, depth = record.depth,
+                        }
+                        local previous = previousSnapshot[record.path]
+                        if deltaMode then
+                            if not previous or previous.signature ~= signature then
+                                record.operation = previous and "update" or "add"
+                                record.observedAtUtc = os.date("!%Y-%m-%dT%H:%M:%SZ")
+                                table.insert(records, record)
+                                state.deltaRecords = state.deltaRecords + 1
+                                if previous then state.updated = state.updated + 1
+                                else state.added = state.added + 1 end
+                            end
+                        else
+                            table.insert(records, record)
+                        end
+                    else
+                        table.insert(records, record)
+                    end
                     state.classes[class] = (state.classes[class] or 0) + 1
                     if #records >= cfg.chunkSize then
                         if not flush(records, serviceName, pass) then
@@ -648,9 +718,38 @@ function Exporter.capture(options, onProgress, control)
             end
         end
 
-        -- A manual cancellation still preserves pending buffered records.
-        if #records > 0 and (not state.stopped or state.cancelled) then
+        -- Tombstones make removals explicit: an analyzer can reconstruct
+        -- GUI state without comparing full repeated snapshots.
+        if deltaMode and not state.stopped then
+            local inspected = 0
+            for path, old in pairs(previousSnapshot) do
+                if stopCheck() then break end
+                if currentSnapshot[path] == nil then
+                    table.insert(records, {
+                        operation = "remove", observedAtUtc = os.date("!%Y-%m-%dT%H:%M:%SZ"),
+                        name = old.name, className = old.className,
+                        path = old.path, parentPath = old.parentPath,
+                        depth = old.depth, properties = {},
+                    })
+                    state.deltaRecords = state.deltaRecords + 1
+                    state.removed = state.removed + 1
+                    if #records >= cfg.chunkSize then
+                        if not flush(records, serviceName, pass) then
+                            state.stopped = true; break
+                        end
+                        records = {}
+                    end
+                end
+                inspected = inspected + 1
+                if inspected % cfg.yieldEvery == 0 then task.wait() end
+            end
+        end
+        -- Stop preserves all records already buffered.
+        if #records > 0 and (not state.stopped or state.cancelled or state.stopRequested) then
             if not flush(records, serviceName, pass) then state.stopped = true end
+        end
+        if currentSnapshot and not state.stopped then
+            guiSnapshots[serviceName] = currentSnapshot
         end
         state.pending = 0
         notify(onProgress, "service_done", state, serviceName)
@@ -671,7 +770,7 @@ function Exporter.capture(options, onProgress, control)
         if ok and streaming then partial("workspace_streaming_enabled") end
     end
 
-    if cfg.twoPassGui and not state.stopped
+    if not cfg.continuous and cfg.twoPassGui and not state.stopped
         and (cfg.targets.PlayerGui or cfg.targets.StarterGui) then
         for pass = 2, cfg.guiPasses do
             notify(onProgress, "waiting_gui_pass", state, "PlayerGui")
