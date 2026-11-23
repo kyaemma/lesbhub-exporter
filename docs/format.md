@@ -56,7 +56,7 @@ Header: `path,parentPath,name,className,depth,properties_json`. The `properties_
 ```json
 {
   "schemaVersion": 1,
-  "exporterVersion": "0.2.0",
+  "exporterVersion": "0.2.1",
   "clientOnly": true,
   "game": {
     "label": "Criminality",
@@ -93,3 +93,13 @@ Do not include `placeId`, `gameId`, capture timestamp, volatile object indexes, 
 A Rust/Python analyzer can read chunks independently, aggregate per service/pass and validate counts against the manifest. Do not merge passes 1, 2, 3, etc. as if they were a single tree: they are separate snapshots. The progress counter is not a fixed total. `stats.files` counts data chunks, not the manifest.
 
 **No completeness cap:** `settings.captureMode = "exhaustive"` means no fixed maximum number of objects, depth, total export bytes or GUI text length; the number of files may be large. Roblox streaming and read restrictions still apply. `stats.assetReferences` counts asset-valued properties included in exported records; it does not indicate downloaded binary asset files.
+
+## Map geometry in JSON
+
+The **Export map geometry** button uses the same versioned chunk schema and exports `Workspace`, `Lighting` and `SoundService`. `BasePart` records include `Position` (Vector3), `CFrame` (12 numeric components: translation + rotation matrix), `Orientation`, `Size`, material and asset references when readable. `Model.WorldPivot` is included where accessible. No voxel data or external binaries are reconstructed.
+
+## Encoding recovery
+
+If a chunk cannot be JSON-encoded, it is recursively subdivided until the problematic record can be isolated. The engine first attempts property-level recovery, then uses placeholder values if necessary. Capture status becomes `partial` and `partialReasons` can contain `record_serialization_recovered` or `property_serialization_error`. A recovery means records were preserved, **not** that every property was preserved without change.
+
+A native place file from `saveinstance()` is a separate executor-controlled format and **does not** follow this JSON schema or the JSON privacy filtering.

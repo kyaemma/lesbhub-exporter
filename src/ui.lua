@@ -226,6 +226,7 @@ function UI.open(Engine)
         elseif mapOnly then
             runConfig.targets = {Workspace = true, Lighting = true, SoundService = true}
             runConfig.twoPassGui = false
+            runConfig.variant = tostring(config.variant) .. "-map"
         end
 
         local events, lastRender, progressCeiling = {}, -math.huge, 1000
@@ -242,7 +243,7 @@ function UI.open(Engine)
             local visited = math.max(info.visited or 0, 0)
             -- The final number of client nodes is unknowable until traversal
             -- finishes. Grow the scale as needed; never clamp at 100k.
-            progressCeiling = math.max(progressCeiling, math.ceil((discovered + 1000) / 1000) * 1000)
+            progressCeiling = math.max(progressCeiling, math.ceil((discovered + 250) / 1000) * 1000)
             if info.stage == "done" then progressCeiling = math.max(visited, 1) end
             if progress then
                 pcall(function()

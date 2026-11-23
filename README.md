@@ -6,7 +6,7 @@ The UI is built with our [Lesbhub WindUI fork](https://github.com/kyaemma/lesbhu
 
 ## Status
 
-**Exhaustive-by-default V1.1 / Roblox + Potassium retest pending.** An earlier build launched successfully in Potassium and produced a 200-record ReplicatedStorage chunk. The new unlimited traversal and live feed are validated by automated Luau smoke tests, not yet by a full live run.
+**V0.2.1: full GUI export verified in Potassium; large full-client export still under validation.** On a modded Criminality variant, a GUI-only capture completed with 28,418 records (7,173 asset references, 3.17s). The following full-client run reached 14,000 visited records but aborted on JSON encoding. V0.2.1 adds recursive chunk isolation and a record-level fallback to continue after malformed data; this recovery now passes a dedicated simulated Luau test but still needs a new live retest.
 
 ## Run from a supported Roblox client environment
 
@@ -25,7 +25,9 @@ For offline/manual distribution, use `dist/lesbhub-exporter.lua` (but the UI sti
 - **Properties:** names, classes, parent/child paths, depth, GUI labels/text/buttons, TextBox placeholders, visual styles, asset IDs, selected world properties and basic values.
 - **Formats:** chunked JSON, JSONL or CSV; one **manifest.json** per capture, with settings, counts, status, errors, and partial reasons.
 - **Dynamic GUI:** guided multi-pass capture (3 passes by default); optional immediate **Capture GUI now** button. Open menus yourself so the exporter never simulates clicks, purchases or remote calls.
-- **Live UI:** current service/pass, class, path, visited/discovered/written objects, pending nodes, file writes, elapsed time, asset-reference counter and last events.
+- **Live UI:** current service/pass, class, path, visited/discovered/written objects, pending nodes, file writes, elapsed time, asset-reference counter and last events. The progress scale expands automatically, beyond 100k if necessary; no artificial upper bound.
+- **Map tab:** JSON geometry export (Workspace/Lighting/SoundService, BasePart position/CFrame/size, Model world pivot, materials and asset references). Optional separate native `saveinstance()` command like Infinite Yield, only after explicit opt-in and only if the executor supports it.
+- **Fault tolerance:** JSON serialization errors are isolated to the offending records. Recovery keeps traversing and records a `partial` manifest status instead of aborting a whole service.
 - **Performance:** iterative depth-first traversal, periodic `task.wait()`, small chunk files, cancellation and no global depth/object/total-byte/string-length cap.
 - **Privacy:** skips other players' characters, chat GUI, `CoreGui`, script source, and potentially sensitive textbox/strings by default. Redacts known player names and common contact/token patterns on a best-effort basis.
 
@@ -59,7 +61,8 @@ The timestamp and clock suffix are **run identifiers**, not signature material. 
    ```powershell
    python scripts/validate_export.py "C:\path\to\LesbhubExporter\criminality\criminality\variant-a\run-folder"
    ```
-5. Review text manually **before sharing**. The automatic redaction layer cannot guarantee removal of all personal or sensitive information.
+5. For map geometry, open the **Map** tab and choose **Export map geometry**. If `saveinstance()` exists, an optional **Save native Roblox place** button delegates to the executor; it may export more than the JSON allowlist, including scripts. Never publish an unreviewed native export.
+6. Review text manually **before sharing**. The automatic redaction layer cannot guarantee removal of all personal or sensitive information.
 
 ## Development
 
@@ -83,7 +86,9 @@ To connect an **already existing empty Windows folder** `C:\dev\Lesbhub\lesbhub-
 - Paths may contain unstable per-session indexes; direct PlaceId/GameId and player-dependent details should **not** become detection signatures.
 - `StringValue.Value` and `TextBox.Text` are **off by default** and should remain off for general datasets; enabling either increases the risk of collecting sensitive information.
 - The exporter may miss instances due to permissions, streaming, concurrent object destruction, cancellation or write errors. A `partial` status is informative, not proof of a game difference.
-- Removing dataset caps does not remove physical resource limits: disk space, Roblox replication, intermittent changes and the executor can still constrain a capture. The progress bar shows **visited / discovered so far**, not a known final total.
+- Removing dataset caps does not remove physical resource limits: disk space, Roblox replication, intermittent changes and the executor can still constrain a capture. The adaptive progress scale is **not a known final object count** and expands as more descendants are discovered.
+- **Map files:** The JSON geometry mode does not export Terrain voxel occupancy or binary asset contents. The native `saveinstance()` mode is controlled by the executor, has different privacy guarantees, and may not be implemented by Potassium. It never runs during normal JSON captures.
+- **Encoding recovery:** If one object has a property that cannot be serialized, the exporter attempts to preserve its metadata and unaffected properties. In rare cases it may replace a property with a marker; check `partialReasons` and `errors` before using that capture as a dataset.
 
 ## References / credits
 

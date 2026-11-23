@@ -1,6 +1,6 @@
 # V1 live test plan (manual; results pending)
 
-An initial Potassium live launch produced a WindUI screenshot and the first 200-record ReplicatedStorage JSON chunk. Full exhaustive mode and dynamic GUI passes remain to be validated in a new live run. The following scenarios are the acceptance suite.
+Potassium live results (modded Criminality variant, 2026-11-23): GUI-only capture completed with 28,418 objects and 7,173 asset references in 3.17 seconds. The next full-client export was partial at 14,000 visited, 13,800 written, with `json_encode_failed:ReplicatedStorage`. V0.2.1 includes tested recovery; live retest pending. The following scenarios are the acceptance suite.
 
 | ID | Scenario | Expected result |
 |---|---|---|
@@ -23,3 +23,7 @@ An initial Potassium live launch produced a WindUI screenshot and the first 200-
 | E17 | Manual GUI-only capture | separate snapshot of currently opened STORE or SKINS via Capture GUI now |
 
 For each run record: executor version, client FPS before/during/after, duration, number of visited/written objects, number of files, manifest status, and validation output. Avoid including player names in test logs.
+| E18 | More than 100,000 discovered objects | progress range expands automatically; no object budget or artificial completion |
+| E19 | Faulty UTF-8 property while scanning | record is recovered, other objects still exported, manifest `partial` explains modification |
+| E20 | Map geometry JSON | CFrame/Position/Size collected from reachable parts; no voxel/binary data claimed |
+| E21 | Native place export supported or unsupported | disabled until explicit operator opt-in; unsupported executors return clear message |
