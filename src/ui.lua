@@ -265,14 +265,14 @@ local function makeJournal(windui, t, alert)
         Name = "LesbhubExporterActivity", Size = UDim2.fromOffset(536, 376),
         Position = UDim2.new(1, -28, 0, 108), AnchorPoint = Vector2.new(1, 0),
         BackgroundColor3 = Color3.fromRGB(27, 27, 30), BackgroundTransparency = 0,
-        BorderSizePixel = 0, ZIndex = 16000, Visible = false,
+        BorderSizePixel = 0, ZIndex = 9000, Visible = false,
     }, windui.ScreenGui)
     round(panel, 17)
     make("UIStroke", {Color = Color3.fromRGB(77, 77, 82), Transparency = 0.35, Thickness = 1}, panel)
     local header = make("Frame", {
         Name = "DragHeader", Size = UDim2.new(1, 0, 0, 52),
         BackgroundColor3 = Color3.fromRGB(19, 19, 22), BorderSizePixel = 0,
-        ZIndex = 16001, Active = true,
+        ZIndex = 9001, Active = true,
     }, panel)
     round(header, 17)
     local headerTitle = make("TextLabel", {
@@ -280,13 +280,13 @@ local function makeJournal(windui, t, alert)
         Size = UDim2.new(1, -104, 0, 30), Text = t("journal"), TextXAlignment = Enum.TextXAlignment.Left,
         Font = Enum.Font.GothamBold, TextSize = 17,
         BackgroundTransparency = 1, TextColor3 = Color3.fromRGB(241, 241, 245),
-        ZIndex = 16002,
+        ZIndex = 9002,
     }, header)
     local close = make("TextButton", {
         Name = "CloseJournal", Text = "×", Font = Enum.Font.GothamBold, TextSize = 25,
         Position = UDim2.new(1, -45, 0, 10), Size = UDim2.fromOffset(34, 32),
         BackgroundColor3 = Color3.fromRGB(51, 51, 55), TextColor3 = Color3.fromRGB(238, 238, 241),
-        BorderSizePixel = 0, ZIndex = 16003,
+        BorderSizePixel = 0, ZIndex = 9003,
     }, header)
     round(close, 9)
     local stats = make("TextLabel", {
@@ -295,20 +295,20 @@ local function makeJournal(windui, t, alert)
         TextXAlignment = Enum.TextXAlignment.Left, TextWrapped = true,
         Font = Enum.Font.Gotham, TextSize = 14,
         BackgroundTransparency = 1, TextColor3 = Color3.fromRGB(218, 218, 223),
-        ZIndex = 16002,
+        ZIndex = 9002,
     }, panel)
     local track = make("Frame", {
         Name = "ActivityTrack", Size = UDim2.new(1, -34, 0, 4),
         Position = UDim2.fromOffset(17, 113), BorderSizePixel = 0,
         BackgroundColor3 = Color3.fromRGB(57, 57, 61),
-        ClipsDescendants = true, ZIndex = 16002,
+        ClipsDescendants = true, ZIndex = 9002,
     }, panel)
     round(track, 3)
     local fill = make("Frame", {
         Name = "ActivityFill", Size = UDim2.new(0.25, 0, 1, 0),
         Position = UDim2.new(-0.25, 0, 0, 0),
         BackgroundColor3 = Color3.fromRGB(83, 156, 251),
-        BorderSizePixel = 0, ZIndex = 16003, Visible = false,
+        BorderSizePixel = 0, ZIndex = 9003, Visible = false,
     }, track)
     round(fill, 3)
     local scrolling = make("ScrollingFrame", {
@@ -317,7 +317,7 @@ local function makeJournal(windui, t, alert)
         BorderSizePixel = 0, ScrollBarThickness = 4,
         AutomaticCanvasSize = Enum.AutomaticSize.Y, CanvasSize = UDim2.fromOffset(0, 0),
         ScrollingDirection = Enum.ScrollingDirection.Y,
-        ZIndex = 16002,
+        ZIndex = 9002,
     }, panel)
     round(scrolling, 9)
     make("UIPadding", {
@@ -330,23 +330,23 @@ local function makeJournal(windui, t, alert)
         Font = Enum.Font.Code, TextSize = 14, TextWrapped = true,
         TextXAlignment = Enum.TextXAlignment.Left, TextYAlignment = Enum.TextYAlignment.Top,
         TextColor3 = Color3.fromRGB(211, 219, 236),
-        ZIndex = 16003,
+        ZIndex = 9003,
     }, scrolling)
     local footer = make("Frame", {
         Name = "Footer", Position = UDim2.new(0, 17, 1, -49),
-        Size = UDim2.new(1, -34, 0, 37), BackgroundTransparency = 1, ZIndex = 16002,
+        Size = UDim2.new(1, -34, 0, 37), BackgroundTransparency = 1, ZIndex = 9002,
     }, panel)
     local copyButton = make("TextButton", {
         Name = "CopyJournal", Text = t("copy"), Size = UDim2.fromOffset(136, 36),
         BackgroundColor3 = Color3.fromRGB(61, 61, 67), TextColor3 = Color3.fromRGB(247, 247, 250),
-        Font = Enum.Font.GothamMedium, TextSize = 14, BorderSizePixel = 0, ZIndex = 16003,
+        Font = Enum.Font.GothamMedium, TextSize = 14, BorderSizePixel = 0, ZIndex = 9003,
     }, footer)
     round(copyButton, 9)
     local dismiss = make("TextButton", {
         Name = "HideJournal", Text = t("close"), Size = UDim2.fromOffset(100, 36),
         Position = UDim2.new(1, -100, 0, 0),
         BackgroundColor3 = Color3.fromRGB(61, 61, 67), TextColor3 = Color3.fromRGB(247, 247, 250),
-        Font = Enum.Font.GothamMedium, TextSize = 14, BorderSizePixel = 0, ZIndex = 16003,
+        Font = Enum.Font.GothamMedium, TextSize = 14, BorderSizePixel = 0, ZIndex = 9003,
     }, footer)
     round(dismiss, 9)
 
@@ -699,15 +699,6 @@ function UI.open(Engine, restore)
         end})
 
     settings:Paragraph({Title = t("setting_intro"), Desc = t("setting_desc")})
-    local function changeLanguage(lang)
-        if running or nativeBusy then alert(t("language"), t("lang_busy")); return end
-        if lang == language or (lang ~= "en" and lang ~= "fr") then return end
-        local saved = saveLanguage(lang)
-        if not saved then alert(t("language"), t("lang_saved_failed")) end
-        local oldConfig = clone(config)
-        local previousPreset = presetKey
-        unload = nil -- placeholder, replaced by close procedure below
-    end
     settings:Dropdown({
         Title = t("language"), Desc = t("language_desc"),
         Values = {"English", "Français"},
@@ -718,7 +709,10 @@ function UI.open(Engine, restore)
             if nextLang == language then return end
             local saved = saveLanguage(nextLang)
             if not saved then alert(t("language"), t("lang_saved_failed")) end
-            local preserved = {language = nextLang, config = clone(config), preset = presetKey}
+            local preserved = {
+                language = nextLang, config = clone(config), preset = presetKey,
+                shortcut = shortcutWidget and shortcutWidget.Value or "RightShift",
+            }
             release()
             pcall(function() Window:Destroy() end)
             task.spawn(function()
@@ -727,7 +721,8 @@ function UI.open(Engine, restore)
             end)
         end,
     })
-    settings:Keybind({
+    local shortcutWidget
+    shortcutWidget = settings:Keybind({
         Title = t("keybind"), Value = restore.shortcut or "RightShift",
         Desc = t("keybind_desc"), Blacklist = {"Unknown", "Escape"},
         Callback = function()
@@ -803,7 +798,7 @@ function UI.open(Engine, restore)
                 captureStatus:SetTitle(tf("stage", tostring(info.service or "-"), tonumber(info.pass) or 1))
                 captureStatus:SetDesc(desc)
             end)
-            journal.setStats(desc .. "  |  " .. tf("pending_label", shortCount(info.pending)))
+            journal.setStats(desc .. "  |  " .. t("pending_label") .. ": " .. shortCount(info.pending))
             local textLines = {
                 tf("stage", tostring(info.service or "-"), tonumber(info.pass) or 1),
                 t("class_label") .. ": " .. tostring(info.currentClass or "-"),
@@ -881,7 +876,7 @@ function UI.open(Engine, restore)
         Window:Dialog({
             Title = t("confirm_export") .. " • " .. kind, Width = 390,
             Content = t("data_local") .. "\n\n"
-                .. (config.textboxValues or config.stringValues and t("data_risk") or t("data_safer"))
+                .. ((config.textboxValues or config.stringValues) and t("data_risk") or t("data_safer"))
                 .. "\n\n" .. t("do_not_publish") .. "\n\n" .. t("no_upload"),
             Buttons = {
                 {Title = t("back"), Variant = "Secondary", Callback = function() end},
