@@ -784,6 +784,42 @@ function Exporter.capture(options, onProgress, control)
         end
     end
 
+    -- A provisional manifest makes long-running sessions inspectable and
+    -- recoverable even if Roblox/executor exits without an orderly Stop.
+    local function checkpoint()
+        local payload = {
+            schemaVersion = Exporter.SCHEMA_VERSION,
+            exporterVersion = Exporter.VERSION, clientOnly = true,
+            status = "recording", captureMode = "continuous",
+            capturedAtUtc = os.date("!%Y-%m-%dT%H:%M:%SZ"),
+            game = {
+                label = sanitizedString(cfg.label, cfg, state),
+                category = sanitizedString(cfg.category, cfg, state),
+                variant = sanitizedString(cfg.variant, cfg, state),
+                placeId = game.PlaceId, gameId = game.GameId,
+            },
+            stats = {
+                visited = state.visited, written = state.written, files = state.fileCount,
+                bytes = state.bytes, assetReferences = state.assetReferences,
+                classCounts = state.classes, redactions = state.redactions,
+                errors = state.errorCount, elapsedSeconds = os.clock() - state.startedAt,
+                monitorCycles = state.monitorCycles, deltaRecords = state.deltaRecords,
+                added = state.added, updated = state.updated, removed = state.removed,
+            },
+            services = state.services,
+            errors = state.errors,
+            partialReasons = {},
+            settings = {format = cfg.format, chunkSize = cfg.chunkSize,
+                continuous = true, continuousInterval = cfg.continuousInterval,
+                captureMode = "continuous", targets = cfg.targets},
+        }
+        local ok, encoded = pcall(function() return HttpService:JSONEncode(payload) end)
+        if not ok or not pcall(writefile, base .. "/manifest.json", encoded) then
+            partial("checkpoint_write_failed")
+            addError(state, "checkpoint_write_failed")
+        end
+    end
+
     local monitorConnections = {}
     local watchedRoots = {}
     local events = {}
@@ -857,10 +893,10 @@ function Exporter.capture(options, onProgress, control)
         end
     end
 
-    local function processEvents()
+    local function processEvents(drain)
         local perService = {}
         local steps = 0
-        while eventHead <= eventTail and not stopCheck() do
+        while eventHead <= eventTail and (drain or not stopCheck()) do
             local event = events[eventHead]
             events[eventHead] = nil
             eventHead = eventHead + 1
@@ -939,11 +975,12 @@ function Exporter.capture(options, onProgress, control)
         end
     end
 
-    if cfg.continuous and not state.stopped then
+    if cfg.continuous and not state.stopped and selected > 0 then
         -- Event handlers capture transient additions/removals (including Workspace);
         -- periodic delta rescans catch changes to already-existing GUI text/visibility.
         local okMonitor, monitorError = pcall(function()
             attachListeners()
+            checkpoint()
             state.monitoring = true
             notify(onProgress, "monitoring_start", state)
             local lastSharedScan = os.clock()
@@ -977,9 +1014,11 @@ function Exporter.capture(options, onProgress, control)
                     end
                 end
                 if state.stopped then break end
+                if state.monitorCycles % 3 == 0 then checkpoint() end
                 notify(onProgress, "monitoring", state)
             end
-            processEvents()
+            disconnectMonitoring()
+            processEvents(true)
         end)
         state.monitoring = false
         disconnectMonitoring()
@@ -1008,6 +1047,8 @@ function Exporter.capture(options, onProgress, control)
         capturedAtUtc = os.date("!%Y-%m-%dT%H:%M:%SZ"),
         status = state.cancelled and "cancelled" or
             (state.stopRequested and "stopped" or (#reasons > 0 and "partial" or "complete")),
+        endedReason = state.cancelled and "cancelled" or
+            (state.stopRequested and "user_stopped" or "finished"),
         partialReasons = reasons,
         stats = {
             visited = state.visited, written = state.written, files = state.fileCount,
