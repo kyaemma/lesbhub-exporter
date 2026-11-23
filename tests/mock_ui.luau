@@ -176,6 +176,23 @@ function engine.capture(cfg, onProgress, control)
         visited = 5, discovered = 9, written = 5, pending = 4,
         files = 1, assetReferences = 3, elapsedSeconds = 0.3})
     assert(control.cancelled == false)
+    if cfg.continuous then
+        onProgress({stage = "monitoring_start", service = "PlayerGui", pass = 1,
+            visited = 8, discovered = 11, written = 8, pending = 3,
+            files = 1, assetReferences = 3, elapsedSeconds = 1.0,
+            monitoring = true, monitorCycles = 0, deltaRecords = 0})
+        assert(control.stopRequested == true,
+            "Stop & Save button must request graceful monitoring termination")
+        onProgress({stage = "monitoring_finalizing", service = "PlayerGui", pass = 2,
+            visited = 12, discovered = 12, written = 10, pending = 0,
+            files = 2, assetReferences = 3, elapsedSeconds = 1.2,
+            deltaRecords = 2})
+        return {folder = "mock-continuous", manifest = {
+            status = "stopped", settings = {continuous = true},
+            stats = {written = 10, files = 2, assetReferences = 3,
+                deltaRecords = 2, elapsedSeconds = 1.2},
+        }}
+    end
     return {folder = "mock-dataset", manifest = {status = "complete",
         stats = {written = 100, files = 1, assetReferences = 3, elapsedSeconds = 0.3}}}
 end
@@ -238,6 +255,22 @@ window.lastDialog.Buttons[2].Callback()
 local mapCfg = engine.calls[4]
 assert(mapCfg.targets.Workspace and mapCfg.targets.Lighting and not mapCfg.targets.PlayerGui)
 assert(activityWindow.Visible == true, "Map capture must keep journal visible")
+
+local continuous = capture:find("Button", "Start continuous capture")
+local stop = capture:find("Button", "Stop & Save")
+assert(continuous and stop, "Continuous capture actions must exist")
+assert(continuous.config.Color and stop.config.Color, "Primary actions must look distinct from text cards")
+assert(fullBtn.config.Color, "Full export must have an accent color")
+assert(window.tabs.Home:find("Button", "Start continuous capture"), "Home continuous shortcut missing")
+continuous.config.Callback()
+assert(#engine.calls == 4, "Continuous capture started without privacy consent")
+assert(window.lastDialog.Content:find("Continuous mode monitors", 1, true),
+    "Continuous mode consent must explain indefinite capture")
+window.lastDialog.Buttons[2].Callback()
+assert(#engine.calls == 5 and engine.calls[5].continuous == true)
+assert(engine.calls[5].targets.PlayerGui and engine.calls[5].targets.StarterGui)
+assert(engine.calls[5].continuousInterval == 6, "Fast preset interval missing")
+
 
 local shortcut = window.tabs.Settings:find("Keybind", "Show / hide key")
 assert(shortcut and shortcut.config.Value == "RightShift")
