@@ -858,17 +858,27 @@ function UI.open(Engine, restore)
             lastDraw = now
             local desc = tf("brief_line", shortCount(info.visited),
                 shortCount(info.files), shortCount(info.assetReferences), info.elapsedSeconds or 0)
+            local activeMonitoring = mode == "continuous"
+                and info.monitoring == true
+            local monitorSummary = activeMonitoring
+                and ("  |  " .. t("monitor_cycles") .. ": " .. shortCount(info.monitorCycles)
+                    .. "  |  " .. t("monitor_deltas") .. ": " .. shortCount(info.deltaRecords))
+                or ""
             pcall(function()
-                captureStatus:SetTitle(tf("stage", tostring(info.service or "-"), tonumber(info.pass) or 1))
-                captureStatus:SetDesc(desc)
+                captureStatus:SetTitle(activeMonitoring and t("monitoring_status")
+                    or tf("stage", tostring(info.service or "-"), tonumber(info.pass) or 1))
+                captureStatus:SetDesc(desc .. monitorSummary)
             end)
-            journal.setStats(desc .. "  |  " .. t("pending_label") .. ": " .. shortCount(info.pending))
+            journal.setStats(desc .. "  |  " .. t("pending_label") .. ": "
+                .. shortCount(info.pending) .. monitorSummary)
             local textLines = {
                 tf("stage", tostring(info.service or "-"), tonumber(info.pass) or 1),
                 t("class_label") .. ": " .. tostring(info.currentClass or "-"),
                 t("current_path") .. ": " .. shorten(info.currentPath, 110),
                 t("discovered_label") .. ": " .. shortCount(info.discovered),
                 t("written_label") .. ": " .. shortCount(info.written),
+                mode == "continuous" and
+                    (t("monitor_deltas") .. ": " .. shortCount(info.deltaRecords)) or "",
                 "---------------------------------------",
                 t("events") .. ":",
             }
