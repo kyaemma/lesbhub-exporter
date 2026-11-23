@@ -46,6 +46,7 @@ function UI.open(Engine)
     local targets = Window:Tab({Title = "Targets", Icon = "layers"})
     local options = Window:Tab({Title = "Options", Icon = "settings"})
     local capture = Window:Tab({Title = "Capture", Icon = "scan"})
+    local map = Window:Tab({Title = "Map", Icon = "map"})
 
     setup:Paragraph({
         Title = "Complete client-visible snapshot",
@@ -170,8 +171,8 @@ function UI.open(Engine)
     local progress = nil
     local okProgress, progressResult = pcall(function()
         return capture:ProgressBar({
-            Title = "Visited / discovered so far",
-            Value = {Min = 0, Max = 1, Default = 0},
+            Title = "Adaptive progress (total not known)",
+            Value = {Min = 0, Max = 1000, Default = 0},
             DisplayMode = "Fraction", Animate = false,
         })
     end)
@@ -199,7 +200,9 @@ function UI.open(Engine)
         if not ok then warn("[Lesbhub Exporter] " .. title .. ": " .. tostring(content)) end
     end
 
-    local function startCapture(guiOnly)
+    local function startCapture(mode)
+        local guiOnly = mode == "gui"
+        local mapOnly = mode == "map"
         if running then alert("Already capturing", "Cancel the existing capture first.") return end
         if type(writefile) ~= "function" or type(makefolder) ~= "function" then
             alert("Missing file APIs", "writefile and makefolder are required.")
@@ -220,9 +223,12 @@ function UI.open(Engine)
         if guiOnly then
             runConfig.targets = {PlayerGui = true, StarterGui = true}
             runConfig.twoPassGui = false
+        elseif mapOnly then
+            runConfig.targets = {Workspace = true, Lighting = true, SoundService = true}
+            runConfig.twoPassGui = false
         end
 
-        local events, lastRender = {}, -math.huge
+        local events, lastRender, progressCeiling = {}, -math.huge, 1000
         local function event(value)
             events[#events + 1] = value
             if #events > 14 then table.remove(events, 1) end
@@ -232,11 +238,16 @@ function UI.open(Engine)
             local now = os.clock()
             if not force and now - lastRender < 0.18 then return end
             lastRender = now
-            local discovered = math.max(info.discovered or 1, 1)
+            local discovered = math.max(info.discovered or 0, 0)
+            local visited = math.max(info.visited or 0, 0)
+            -- The final number of client nodes is unknowable until traversal
+            -- finishes. Grow the scale as needed; never clamp at 100k.
+            progressCeiling = math.max(progressCeiling, math.ceil((discovered + 1000) / 1000) * 1000)
+            if info.stage == "done" then progressCeiling = math.max(visited, 1) end
             if progress then
                 pcall(function()
-                    progress:SetRange(0, discovered)
-                    progress:Set(math.min(info.visited or 0, discovered))
+                    progress:SetRange(0, progressCeiling)
+                    progress:Set(math.min(visited, progressCeiling))
                 end)
             end
             if status then
@@ -244,9 +255,10 @@ function UI.open(Engine)
                     status:SetTitle(string.format("%s  /  pass %d",
                         tostring(info.service or "Export"), tonumber(info.pass) or 1))
                     status:SetDesc(string.format(
-                        "Visited: %d | Written: %d | Waiting: %d | Files: %d | Assets: %d | %.1fs",
-                        info.visited or 0, info.written or 0, info.pending or 0,
-                        info.files or 0, info.assetReferences or 0, info.elapsedSeconds or 0))
+                        "Visited: %d | Discovered: %d+ | Waiting: %d | Written: %d | Files: %d | Assets: %d | %.1fs",
+                        info.visited or 0, info.discovered or 0, info.pending or 0,
+                        info.written or 0, info.files or 0, info.assetReferences or 0,
+                        info.elapsedSeconds or 0))
                 end)
             end
             if log then
@@ -263,11 +275,13 @@ function UI.open(Engine)
         end
 
         if progress then
-            pcall(function() progress:SetRange(0, 1); progress:Set(0) end)
+            pcall(function() progress:SetRange(0, 1000); progress:Set(0) end)
         end
         if status then pcall(function() status:SetTitle("Starting...") end) end
-        event(guiOnly and "Starting manual GUI snapshot" or "Starting exhaustive client capture")
-        if not guiOnly and runConfig.twoPassGui then
+        event(guiOnly and "Starting manual GUI snapshot"
+            or (mapOnly and "Starting Workspace map geometry export"
+                or "Starting exhaustive client capture"))
+        if not guiOnly and not mapOnly and runConfig.twoPassGui then
             alert("Guided menu capture",
                 "After the initial scan, open STORE for pass 2, then SKINS for pass 3.")
         end
@@ -321,12 +335,12 @@ function UI.open(Engine)
 
     capture:Button({
         Title = "Start full export", Icon = "download",
-        Callback = function() startCapture(false) end,
+        Callback = function() startCapture("full") end,
     })
     capture:Button({
         Title = "Capture GUI now", Icon = "monitor",
         Desc = "Open STORE, SKINS or another menu yourself, then click this button.",
-        Callback = function() startCapture(true) end,
+        Callback = function() startCapture("gui") end,
     })
     capture:Button({
         Title = "Cancel capture", Icon = "square",
@@ -337,6 +351,55 @@ function UI.open(Engine)
             end
         end,
     })
+    map:Paragraph({
+        Title = "Map geometry (JSON)",
+        Desc = "Exports Workspace, Lighting and SoundService with part positions, rotations, sizes, materials and asset references. Client-visible only; Terrain voxels and binary assets are not included.",
+    })
+    map:Button({
+        Title = "Export map geometry", Icon = "box",
+        Desc = "Works with the existing read-only exporter and chunked files.",
+        Callback = function() startCapture("map") end,
+    })
+    map:Paragraph({
+        Title = "Native place file (Infinite Yield-style)",
+        Desc = "IY's savegame command calls the executor's saveinstance(). This is optional and may include more than geometry or unfiltered contents. Review any resulting file before sharing.",
+    })
+    local nativeAllowed, nativeBusy = false, false
+    map:Toggle({
+        Title = "I authorize executor-native saveinstance()",
+        Value = false,
+        Desc = "Separate from Lesbhub's privacy-filtered JSON. Requires a supported executor.",
+        Callback = function(value) nativeAllowed = value == true end,
+    })
+    map:Button({
+        Title = "Save native Roblox place", Icon = "save",
+        Desc = "Only available if the current executor implements saveinstance().",
+        Callback = function()
+            if not nativeAllowed then
+                alert("Confirmation required", "Enable the native export toggle first.")
+                return
+            end
+            if running or nativeBusy then
+                alert("Exporter busy", "Wait for the current operation to finish.")
+                return
+            end
+            nativeBusy = true
+            alert("Native export requested", "The executor controls the output and location.")
+            task.spawn(function()
+                local ok, supported, result = pcall(Engine.savePlace)
+                nativeBusy = false
+                if not ok then
+                    alert("Native export failed", tostring(supported))
+                elseif not supported then
+                    alert("Native export unavailable", tostring(result))
+                else
+                    alert("Native export returned", "Check your executor's workspace; a place file is not guaranteed.")
+                    print("[Lesbhub Exporter] saveinstance returned: " .. tostring(result))
+                end
+            end)
+        end,
+    })
+
     capture:Paragraph({
         Title = "Privacy reminder",
         Desc = "Captures may contain GUI text. Review before publishing. Player-name and token redaction is best-effort.",
