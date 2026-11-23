@@ -1021,6 +1021,22 @@ function Exporter.capture(options, onProgress, control)
             end
             disconnectMonitoring()
             processEvents(true)
+            if state.stopRequested and not state.cancelled
+                and (cfg.targets.PlayerGui or cfg.targets.StarterGui) then
+                -- One last sweep catches the GUI state at the instant Stop
+                -- was pressed, even if the scheduled interval was not due.
+                -- Do not mistake this deliberate last sweep for a background loop.
+                notify(onProgress, "monitoring_finalizing", state)
+                control.stopRequested = false
+                state.stopped = false
+                cyclePass = cyclePass + 1
+                for _, service in ipairs({"PlayerGui", "StarterGui"}) do
+                    if cfg.targets[service] then scan(service, cyclePass, "delta") end
+                    if state.stopped then break end
+                end
+                control.stopRequested = true
+                state.stopped = true
+            end
         end)
         state.monitoring = false
         disconnectMonitoring()
