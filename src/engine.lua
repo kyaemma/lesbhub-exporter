@@ -496,7 +496,7 @@ function Exporter.capture(options, onProgress, control)
     end
 
     local chunkIndexes = {}
-    local guiSnapshots = {}
+    local serviceSnapshots = {}
 
     local function asciiFallback(value)
         -- Preserve UTF-8 bytes reversibly when an executor's JSON encoder
@@ -593,9 +593,8 @@ function Exporter.capture(options, onProgress, control)
     local function scan(serviceName, pass, mode)
         if stopCheck() then return end
         local deltaMode = cfg.continuous and mode == "delta"
-        local baselineMode = cfg.continuous and mode ~= "delta"
-            and (serviceName == "PlayerGui" or serviceName == "StarterGui")
-        local previousSnapshot = guiSnapshots[serviceName] or {}
+        local baselineMode = cfg.continuous and mode ~= "delta" and serviceName ~= "Workspace"
+        local previousSnapshot = serviceSnapshots[serviceName] or {}
         local currentSnapshot = deltaMode and {} or (baselineMode and {} or nil)
         local root = rootInstance(serviceName)
         if not root then
@@ -749,7 +748,7 @@ function Exporter.capture(options, onProgress, control)
             if not flush(records, serviceName, pass) then state.stopped = true end
         end
         if currentSnapshot and not state.stopped then
-            guiSnapshots[serviceName] = currentSnapshot
+            serviceSnapshots[serviceName] = currentSnapshot
         end
         state.pending = 0
         notify(onProgress, "service_done", state, serviceName)
@@ -785,6 +784,213 @@ function Exporter.capture(options, onProgress, control)
         end
     end
 
+    local monitorConnections = {}
+    local watchedRoots = {}
+    local events = {}
+    local eventHead = 1
+    local eventTail = 0
+
+    local function disconnectMonitoring()
+        for _, connection in ipairs(monitorConnections) do
+            pcall(function() connection:Disconnect() end)
+        end
+        table.clear(monitorConnections)
+    end
+
+    local function pathFor(instance, service, root)
+        local names, depth = {}, 0
+        local obj = instance
+        while obj and obj ~= root do
+            if state.characters[obj] or isForbidden(obj, service, state) then return nil end
+            names[#names + 1] = readName(obj, cfg, state):gsub("[./\\]", "_")
+            local okParent, parent = pcall(function() return obj.Parent end)
+            if not okParent then return nil end
+            obj = parent
+            depth = depth + 1
+            if depth > 400 then return nil end -- parent-chain guard, not a scan depth cap
+        end
+        if obj ~= root then return nil end
+        local parts = {service}
+        for i = #names, 1, -1 do parts[#parts + 1] = names[i] end
+        local path = table.concat(parts, "/")
+        local parentPath = #parts > 1 and table.concat(parts, "/", 1, #parts - 1) or ""
+        return path, parentPath, depth
+    end
+
+    local function enqueue(service, root, instance, operation)
+        local path, parent, depth = pathFor(instance, service, root)
+        if not path then return end
+        eventTail = eventTail + 1
+        events[eventTail] = {
+            instance = instance, service = service, operation = operation,
+            path = path, parentPath = parent, depth = depth,
+            at = os.date("!%Y-%m-%dT%H:%M:%SZ"),
+        }
+    end
+
+    local function attachListeners()
+        for _, service in ipairs(Exporter.TARGETS) do
+            if cfg.targets[service] and not watchedRoots[service] then
+                local root = rootInstance(service)
+                if root and root.DescendantAdded and root.DescendantRemoving then
+                    local okAdded, added = pcall(function()
+                        return root.DescendantAdded:Connect(function(obj)
+                            enqueue(service, root, obj, "add")
+                        end)
+                    end)
+                    local okRemoved, removed = pcall(function()
+                        return root.DescendantRemoving:Connect(function(obj)
+                            enqueue(service, root, obj, "remove")
+                        end)
+                    end)
+                    if okAdded and okRemoved then
+                        watchedRoots[service] = root
+                        monitorConnections[#monitorConnections + 1] = added
+                        monitorConnections[#monitorConnections + 1] = removed
+                    else
+                        if okAdded then added:Disconnect() end
+                        if okRemoved then removed:Disconnect() end
+                        partial("event_monitor_unavailable:" .. service)
+                    end
+                end
+            end
+        end
+    end
+
+    local function processEvents()
+        local perService = {}
+        local steps = 0
+        while eventHead <= eventTail and not stopCheck() do
+            local event = events[eventHead]
+            events[eventHead] = nil
+            eventHead = eventHead + 1
+            if event then
+                local classOk, class = pcall(function() return event.instance.ClassName end)
+                if not classOk then class = "Unknown" end
+                local name = event.path:match("([^/]+)$") or "Unknown"
+                local props = {}
+                if event.operation == "add" then
+                    props = collectProperties(event.instance, cfg, state)
+                end
+                local record = {
+                    operation = event.operation,
+                    observedAtUtc = event.at,
+                    name = name, className = class, depth = event.depth,
+                    path = event.path, parentPath = event.parentPath,
+                    properties = props,
+                }
+                local snapshot = serviceSnapshots[event.service]
+                local old = snapshot and snapshot[event.path]
+                if event.operation == "remove" then
+                    if snapshot then snapshot[event.path] = nil end
+                    state.removed = state.removed + 1
+                else
+                    if old then
+                        record.operation = "update"
+                        state.updated = state.updated + 1
+                    else
+                        state.added = state.added + 1
+                    end
+                    if snapshot then
+                        snapshot[event.path] = {
+                            signature = recordFingerprint(record),
+                            name = name, className = class, path = event.path,
+                            parentPath = event.parentPath, depth = event.depth,
+                        }
+                    end
+                end
+                state.deltaRecords = state.deltaRecords + 1
+                state.visited = state.visited + 1
+                state.discovered = state.discovered + 1
+                state.currentService = event.service
+                state.currentPath = event.path
+                state.currentClass = class
+                state.currentPass = 2
+                state.classes[class] = (state.classes[class] or 0) + 1
+                local serviceStats = state.services[event.service]
+                if serviceStats then
+                    serviceStats.visited = serviceStats.visited + 1
+                    serviceStats.passes = math.max(serviceStats.passes, 2)
+                    local bucket = perService[event.service]
+                    if not bucket then bucket = {}; perService[event.service] = bucket end
+                    bucket[#bucket + 1] = record
+                    if #bucket >= cfg.chunkSize then
+                        if not flush(bucket, event.service, 2) then
+                            state.stopped = true
+                            break
+                        end
+                        perService[event.service] = {}
+                    end
+                end
+            end
+            steps = steps + 1
+            if steps % cfg.yieldEvery == 0 then
+                notify(onProgress, "monitoring", state)
+                task.wait()
+            end
+        end
+        -- Empty the queue only after all currently queued items were read.
+        if eventHead > eventTail then
+            events = {}; eventHead = 1; eventTail = 0
+        end
+        -- Flush small batches too: a menu may be opened only briefly.
+        for service, bucket in pairs(perService) do
+            if #bucket > 0 and not flush(bucket, service, 2) then state.stopped = true end
+        end
+    end
+
+    if cfg.continuous and not state.stopped then
+        -- Event handlers capture transient additions/removals (including Workspace);
+        -- periodic delta rescans catch changes to already-existing GUI text/visibility.
+        local okMonitor, monitorError = pcall(function()
+            attachListeners()
+            state.monitoring = true
+            notify(onProgress, "monitoring_start", state)
+            local lastSharedScan = os.clock()
+            local cyclePass = 1
+            while not stopCheck() do
+                local deadline = os.clock() + cfg.continuousInterval
+                while os.clock() < deadline and not stopCheck() do
+                    processEvents()
+                    task.wait(0.15)
+                end
+                if stopCheck() then break end
+                attachListeners()
+                processEvents()
+                cyclePass = cyclePass + 1
+                state.monitorCycles = state.monitorCycles + 1
+                for _, service in ipairs({"PlayerGui", "StarterGui"}) do
+                    if cfg.targets[service] then scan(service, cyclePass, "delta") end
+                    if state.stopped then break end
+                end
+                if state.stopped then break end
+                -- Less frequent structural refresh. Workspace is event-driven
+                -- because polling hundreds of thousands of map parts is wasteful.
+                if os.clock() - lastSharedScan >= math.max(15, cfg.continuousInterval * 5) then
+                    lastSharedScan = os.clock()
+                    for _, service in ipairs(Exporter.TARGETS) do
+                        if cfg.targets[service] and service ~= "PlayerGui"
+                            and service ~= "StarterGui" and service ~= "Workspace" then
+                            scan(service, cyclePass, "delta")
+                        end
+                        if state.stopped then break end
+                    end
+                end
+                if state.stopped then break end
+                notify(onProgress, "monitoring", state)
+            end
+            processEvents()
+        end)
+        state.monitoring = false
+        disconnectMonitoring()
+        if not okMonitor then
+            partial("monitoring_error")
+            addError(state, "monitoring_error:" .. tostring(monitorError):sub(1, 130))
+            state.stopped = true
+        end
+        notify(onProgress, "monitoring_stopped", state)
+    end
+
     if state.errorCount > 0 then partial("read_or_write_errors") end
     local reasons = {}
     for reason in pairs(state.partialReasons) do table.insert(reasons, reason) end
@@ -800,13 +1006,16 @@ function Exporter.capture(options, onProgress, control)
             placeId = game.PlaceId, gameId = game.GameId,
         },
         capturedAtUtc = os.date("!%Y-%m-%dT%H:%M:%SZ"),
-        status = state.cancelled and "cancelled" or (#reasons > 0 and "partial" or "complete"),
+        status = state.cancelled and "cancelled" or
+            (state.stopRequested and "stopped" or (#reasons > 0 and "partial" or "complete")),
         partialReasons = reasons,
         stats = {
             visited = state.visited, written = state.written, files = state.fileCount,
             bytes = state.bytes, redactions = state.redactions, errors = state.errorCount,
             assetReferences = state.assetReferences, classCounts = state.classes,
             elapsedSeconds = os.clock() - state.startedAt,
+            monitorCycles = state.monitorCycles, deltaRecords = state.deltaRecords,
+            added = state.added, updated = state.updated, removed = state.removed,
         },
         services = state.services,
         errors = state.errors,
@@ -817,7 +1026,8 @@ function Exporter.capture(options, onProgress, control)
             stringValues = cfg.stringValues, twoPassGui = cfg.twoPassGui,
             guiPasses = cfg.guiPasses, secondPassDelay = cfg.secondPassDelay,
             chunkSize = cfg.chunkSize, yieldEvery = cfg.yieldEvery,
-            captureMode = "exhaustive",
+            continuous = cfg.continuous, continuousInterval = cfg.continuousInterval,
+            captureMode = cfg.continuous and "continuous" or "exhaustive",
         },
         privacy = {
             excludesOtherPlayerCharacters = true,
@@ -832,6 +1042,9 @@ function Exporter.capture(options, onProgress, control)
             "StreamingEnabled can result in missing Workspace descendants.",
             "No global node, depth, total byte, or string-length limit is applied.",
             "GUI snapshots are not merged; lazy menus must be opened by the operator.",
+            "Continuous mode: pass 1 is a full snapshot; later records have operations add/update/remove.",
+            "Workspace changes are captured through client DescendantAdded/DescendantRemoving events.",
+            "GUI properties are refreshed periodically and unchanged records are not rewritten.",
             "Asset references are exported as property values; binary assets are not downloaded.",
             "Paths and GUI strings can still contain contextual data; review before publishing.",
             "IDs, volatile paths and dynamic player fields must not be used in detection signatures.",
