@@ -110,6 +110,35 @@ local REMOTE_CLASSES = {
     RemoteEvent = true, RemoteFunction = true, UnreliableRemoteEvent = true,
     BindableEvent = true, BindableFunction = true,
 }
+-- These are documented class capabilities, not observations of live traffic.
+-- Do not imply that a particular game uses either possible network direction.
+local REMOTE_INFO = {
+    RemoteEvent = {
+        family = "remote", boundary = "client_server", style = "event",
+        asynchronous = true, requiresResponse = false,
+        delivery = "reliable_ordered",
+    },
+    UnreliableRemoteEvent = {
+        family = "remote", boundary = "client_server", style = "event",
+        asynchronous = true, requiresResponse = false,
+        delivery = "unreliable_unordered",
+    },
+    RemoteFunction = {
+        family = "remote", boundary = "client_server", style = "function",
+        asynchronous = false, requiresResponse = true,
+        delivery = "request_response",
+    },
+    BindableEvent = {
+        family = "bindable", boundary = "same_side", style = "event",
+        asynchronous = true, requiresResponse = false,
+        delivery = "local_event",
+    },
+    BindableFunction = {
+        family = "bindable", boundary = "same_side", style = "function",
+        asynchronous = false, requiresResponse = true,
+        delivery = "local_request_response",
+    },
+}
 local ASSET_CLASSES = {
     Sound = true, Animation = true, Decal = true, Texture = true,
     SurfaceAppearance = true, SpecialMesh = true, ParticleEmitter = true,
@@ -434,6 +463,24 @@ local function collectProperties(instance, cfg, state)
                 end
             end
         end
+    end
+
+    -- A remote's callable methods and server-side handlers are not native
+    -- readable properties. Add only verified class-level capabilities, never
+    -- pretend to know arguments, listeners, invocations, or actual direction.
+    if REMOTE_CLASSES[class] then
+        local info = REMOTE_INFO[class]
+        properties.RemoteInfo = {
+            family = info.family,
+            boundary = info.boundary,
+            style = info.style,
+            asynchronous = info.asynchronous,
+            requiresResponse = info.requiresResponse,
+            delivery = info.delivery,
+            metadataSource = "roblox_class",
+            observedCalls = false,
+            parameterSchema = "unavailable",
+        }
     end
 
     -- Roblox attributes and tags are accessible on the client without any
@@ -1362,7 +1409,7 @@ function Exporter.capture(options, onProgress, control)
             "Categorized output places data in category/service subfolders while preserving original paths.",
             "The scripts category contains metadata only, not script sources.",
             "Native Archivable/Enabled/RunContext, attributes, tags and safe client-visible Instance references are collected when readable.",
-            "The remotes category inventories objects, not network traffic, arguments or event listeners.",
+            "RemoteInfo contains documented class capabilities only; not intercepted traffic, handlers, argument schemas or observed call direction.",
             "Continuous mode: pass 1 is a full snapshot; later records have operations add/update/remove.",
             "Workspace changes are captured through client DescendantAdded/DescendantRemoving events.",
             "GUI properties are refreshed periodically and unchanged records are not rewritten.",
