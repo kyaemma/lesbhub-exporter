@@ -6,7 +6,7 @@ The UI is built with our [Lesbhub WindUI fork](https://github.com/kyaemma/lesbhu
 
 ## Status
 
-**V0.3.0: streamlined WindUI and option presets.** The UI and engine are covered by Luau CLI mock tests and GitHub Actions; this UI update still needs a fresh Potassium session test. Earlier builds successfully exported large client snapshots. On a modded Criminality variant, a GUI-only capture completed with 28,418 records (7,173 asset references, 3.17s). The following full-client run reached 14,000 visited records but aborted on JSON encoding. V0.2.1 adds recursive chunk isolation and a record-level fallback to continue after malformed data; this recovery now passes a dedicated simulated Luau test but still needs a new live retest.
+**v0.4.0: bilingual Home and floating activity journal.** Earlier Potassium captures have demonstrated large exports; the most recent screenshots show 223.7K objects, 44.7K asset references and a 60.3-second run (partial status, reason not yet confirmed from its manifest). This UI update is validated with Luau and Python automated tests, including a simulated floating journal. A visual Potassium retest is still needed.
 
 ## Run from a supported Roblox client environment
 
@@ -25,29 +25,39 @@ For offline/manual distribution, use `dist/lesbhub-exporter.lua` (but the UI sti
 - **Properties:** names, classes, parent/child paths, depth, GUI labels/text/buttons, TextBox placeholders, visual styles, asset IDs, selected world properties and basic values.
 - **Formats:** chunked JSON, JSONL or CSV; one **manifest.json** per capture, with settings, counts, status, errors, and partial reasons.
 - **Full export + GUI:** one action for structures and guided GUI snapshots (4 passes by default in Max informations); optional extra **Capture GUI now** for an ad-hoc menu. Open menus yourself; the exporter does not simulate clicks, purchases or remote calls.
-- **Live UI:** indeterminate activity animation while capturing (no fake percentage), exact visited/written stats formatted as K/M, service/pass, current path, files, assets, elapsed time and recent events. Animation stops on completion.
+- **Floating activity log:** detached draggable journal, auto-opened for every export, with exact K/M counters, current path, recent events and copy control. No false percentage.
 - **Map tab:** JSON geometry export (Workspace/Lighting/SoundService, BasePart position/CFrame/size, Model world pivot, materials and asset references). Optional separate native `saveinstance()` command like Infinite Yield, only after explicit opt-in and only if the executor supports it.
 - **Fault tolerance:** JSON serialization errors are isolated to the offending records. Recovery keeps traversing and records a `partial` manifest status instead of aborting a whole service.
 - **Performance:** iterative depth-first traversal, periodic `task.wait()`, small chunk files, cancellation and no global depth/object/total-byte/string-length cap.
-- **Privacy:** skips other players' characters, chat GUI, `CoreGui` and script source. In v0.3.0 the three option presets **enable** TextBox.Text and StringValue.Value by default for local research; every capture requires acknowledging a private-data warning. Redaction of known player names and common token patterns remains best-effort.
+- **Privacy:** skips other players' characters, chat GUI, `CoreGui` and script source. All UI presets **enable** TextBox.Text and StringValue.Value for local research; every capture requires acknowledging a private-data warning. Redaction of known player names and common token patterns remains best-effort.
 
-## WindUI interface
+## WindUI interface (v0.4)
 
-The default preset is **Max informations**. All targets are selected. Open **Options → Advanced** only if you need to override a setting; it starts collapsed.
+The interface defaults to **English**. The new **Home** tab provides shortcuts to Full export + GUI, GUI-only capture, map export, the floating log, Targets and Options.
 
-| Preset | Content | GUI snapshots | Traversal |
+### Language and persistence
+
+In **Settings → Language / Langue**, choose **Français** to switch the entire Lesbhub UI to French. The selected language is saved as `en` or `fr` to the executor-local file `LesbhubExporter/language.txt` using `writefile`. If `readfile` is supported, the next launch restores it. Switching languages reloads WindUI after the previous instance is destroyed and preserves current options/targets. Language changes are blocked while exporting.
+
+### Capture modes and presets
+
+All target services are selected initially. **Full export + GUI** always includes a local PlayerGui and StarterGui snapshot, plus additional guided passes if enabled. The other button **Capture GUI now** is strictly optional.
+
+| Preset | Content | GUI snapshots | Work per step |
 |---|---|---|---|
-| **Max informations** | All allowlisted GUI and world properties, GUI text, asset IDs, TextBox.Text and StringValue.Value | 4 | Thorough, frequent yields |
-| **Smart** | Same allowlisted property set, reduced GUI passes and balanced chunking | 3 | Balanced |
-| **Fast** | Still all selected objects, GUI text, asset IDs, TextBox.Text and StringValue.Value, but fewer geometry/layout properties | 2 | Larger chunks, less property work |
+| Max information | All allowlisted properties including user input fields | 4 | Detailed |
+| Smart | All allowlisted properties, balanced pace | 3 | Balanced |
+| Fast | All object names/classes, GUI text, asset references and opted-in values, fewer visual/world properties | 2 | Faster |
 
-All presets require **explicit confirmation before export**, explaining that the locally saved archive may contain private fields and must not be published without review. There is no network upload.
+The advanced settings remain collapsed by default. Every export confirms that local data may be sensitive, and no data is uploaded by the exporter.
 
-The **Capture** tab shows a moving, indeterminate activity bar and real live counts abbreviated as K/M. It intentionally does **not** claim to know the final percentage before traversal completes. Full export already captures GUI snapshots; **Capture GUI now** is an extra manual capture, not a required second step.
+### Floating journal
 
-The **Settings** tab contains a configurable show/hide keybind (**RightShift** by default), a Hide button and an **Unload GUI** button. Unload destroys WindUI, disconnects the library's listeners and requests cancellation of any running capture (written chunks are retained). Clicking the window's built-in close-and-destroy action triggers the same cancellation cleanup.
+The **activity window** is an independently draggable, non-modal panel attached to the WindUI ScreenGui (not to the Capture tab). It automatically opens when an export starts **from Home, Capture or Map**, with a moving activity indicator, actual K/M counters, current service/path and recent events. Close and reopen it without interrupting the capture via **Open activity window** in Home, Capture, Map or Settings. The **Copy log** button uses an available clipboard API.
 
-If the exporter is already open, re-running the loader focuses the existing window rather than making duplicates. To load an updated UI version within the same session, use **Settings → Unload GUI** before re-injecting.
+Settings also has a configurable show/hide keybind (initially **RightShift**), Hide and **Unload GUI**. Unload destroys both the main UI and floating window, disconnects UI listeners and requests cancellation of a running capture. The written files remain on disk.
+
+**Native place backup:** Only the separate optional `saveinstance()` action invokes executor-native place saving. The executor may display `Decompiling scripts...`; the normal JSON exporter never decompiles scripts.
 
 ### Output directory
 
@@ -74,12 +84,12 @@ The timestamp and clock suffix are **run identifiers**, not signature material. 
 
 1. Start a Roblox session and launch the exporter. Enter a game label, category and variant.
 2. Select target services and output format. Use GUI-only for targeted interface studies or full client for broad structural comparisons.
-3. In **Options**, choose **Max informations**, **Smart** or **Fast**. Use **Advanced** only if you want to customize details. **Full export + GUI** includes guided GUI snapshots by default: open **STORE** and **SKINS** when prompted. **Capture GUI now** is optional.
+3. In **Options**, choose **Max information**, **Smart** or **Fast**. Use **Advanced** only if you want to customize details. **Full export + GUI** includes guided GUI snapshots by default: open **STORE** and **SKINS** when prompted. **Capture GUI now** is optional.
 4. Read and accept the **local-data privacy confirmation** before the capture starts. Then review the `manifest.json` (especially `status`, `partialReasons` and counts), and validate the directory:
    ```powershell
    python scripts/validate_export.py "C:\path\to\LesbhubExporter\criminality\criminality\variant-a\run-folder"
    ```
-5. For map geometry, open the **Map** tab and choose **Export map geometry**. If `saveinstance()` exists, an optional **Save native Roblox place** button delegates to the executor; it may export more than the JSON allowlist, including scripts. Never publish an unreviewed native export.
+5. For map geometry, open the **Map** tab and choose **Export map as JSON**. If `saveinstance()` exists, an optional **Save native Roblox place** button delegates to the executor; it may export more than the JSON allowlist, including scripts. Never publish an unreviewed native export.
 6. Review text manually **before sharing**. The automatic redaction layer cannot guarantee removal of all personal or sensitive information.
 
 ## Development
@@ -102,7 +112,7 @@ To connect an **already existing empty Windows folder** `C:\dev\Lesbhub\lesbhub-
 - Script metadata can be listed; **no Source, bytecode, decompilation or privileged executor APIs are collected**.
 - A scan is a **snapshot**. Not all dynamically created GUI will exist at capture time. Additional GUI passes can capture menus opened by the operator. Hidden but already-instantiated objects are exported even when `Visible = false`.
 - Paths may contain unstable per-session indexes; direct PlaceId/GameId and player-dependent details should **not** become detection signatures.
-- `StringValue.Value` and `TextBox.Text` are **off by default** and should remain off for general datasets; enabling either increases the risk of collecting sensitive information.
+- All **UI presets** enable `StringValue.Value` and `TextBox.Text` by default at the user's request; the headless engine still defaults them off. Review private exports before reuse.
 - The exporter may miss instances due to permissions, streaming, concurrent object destruction, cancellation or write errors. A `partial` status is informative, not proof of a game difference.
 - Removing dataset caps does not remove physical resource limits: disk space, Roblox replication, intermittent changes and the executor can still constrain a capture. The animated progress bar is **activity**, not an estimated percentage; actual counts are shown alongside.
 - **Map files:** The JSON geometry mode does not export Terrain voxel occupancy or binary asset contents. The native `saveinstance()` mode is controlled by the executor, has different privacy guarantees, and may not be implemented by Potassium. It never runs during normal JSON captures.

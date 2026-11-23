@@ -1,6 +1,6 @@
 # V1 live test plan (manual; results pending)
 
-Potassium live results (modded Criminality variant, 2026-11-23): GUI-only capture completed with 28,418 objects and 7,173 asset references in 3.17 seconds. The next full-client export was partial at 14,000 visited, 13,800 written, with `json_encode_failed:ReplicatedStorage`. V0.2.1 includes tested recovery; live retest pending. The following scenarios are the acceptance suite.
+Potassium live results (modded Criminality variant, 2026-11-23): GUI-only capture completed with 28,418 objects and 7,173 asset references in 3.17 seconds. The next full-client export was partial at 14,000 visited, 13,800 written, with `json_encode_failed:ReplicatedStorage`. V0.2.1 added encoding recovery. Later screenshots show 223.7K records, 44.7K asset references and a 60.3-second run (partial status; cause needs manifest review). The v0.4 UI still needs live visual validation. The following scenarios are the acceptance suite.
 
 | ID | Scenario | Expected result |
 |---|---|---|
@@ -10,7 +10,7 @@ Potassium live results (modded Criminality variant, 2026-11-23): GUI-only captur
 | E04 | Stop during a long Workspace traversal | `cancelled` status and partial manifest, previously written files preserved |
 | E05 | Client dataset larger than 15,000 nodes and/or deeper than 28 levels | no global limit truncation; all reachable nodes enumerated until manual cancellation or actual runtime failure |
 | E06 | Missing `writefile` / `makefolder` | clear error, no silent upload / fallback exfiltration |
-| E07 | TextBox containing a typed personal message | no TextBox.Text in default export |
+| E07 | TextBox containing a typed personal message | Headless engine default omits it; UI presets include it only after privacy acknowledgment |
 | E08 | Player names and characters | other characters omitted; known player aliases masked |
 | E09 | JSON / JSONL / CSV output | each passes `validate_export.py` |
 | E10 | StarterGui/PlayerGui not yet present | no crash; missing root reported |
@@ -19,10 +19,9 @@ Potassium live results (modded Criminality variant, 2026-11-23): GUI-only captur
 | E13 | WindUI fork not reachable | understandable UI load error; engine remains independently usable |
 | E14 | Audit public release | no real-world names, chat transcripts or private game strings committed |
 | E15 | Roblox asset-bearing instances | `Image`, `MeshId`, `Texture`, `SoundId` stored as references; no binary downloads claimed |
-| E16 | Live WindUI progress | changing class/path, counters, files written and elapsed time visible without significant FPS spikes |
+| E16 | Detached log activity | changing path and real counters visible from Home/Capture/Map with no FPS spikes |
 | E17 | Manual GUI-only capture | separate snapshot of currently opened STORE or SKINS via Capture GUI now |
-
-| E18 | More than 100,000 discovered objects | progress range expands automatically; no object budget or artificial completion |
+| E18 | More than 100,000 discovered objects | indeterminate progress and exact compact K/M counters without a fake completion percentage |
 | E19 | Faulty UTF-8 property while scanning | record is recovered, other objects still exported, manifest `partial` explains modification |
 | E20 | Map geometry JSON | CFrame/Position/Size collected from reachable parts; no voxel/binary data claimed |
 | E21 | Native place export supported or unsupported | disabled until explicit operator opt-in; unsupported executors return clear message |
@@ -33,7 +32,14 @@ Potassium live results (modded Criminality variant, 2026-11-23): GUI-only captur
 | E26 | Data privacy confirmation | no scan until user explicitly accepts warning, cancellation leaves no new capture |
 | E27 | Progress and counters | activity bar never claims false completion, counts compact K/M, animation stops at end |
 | E28 | Keybind | RightShift initially, new binding toggles once and ignores input while editing |
-| E29 | Unload GUI | destroys UI, clears handle/listeners and requests capture cancellation |
+| E29 | Unload GUI | destroys main UI and floating log, clears handle/listeners and requests capture cancellation |
+| E30 | First launch without language file | navigation and UI start in English |
+| E31 | Switch language in Settings | French is saved in LesbhubExporter/language.txt and restored on relaunch |
+| E32 | Change language while capturing | blocked, without stopping capture |
+| E33 | Home shortcuts | Full/GUI/Map, log and settings navigation available |
+| E34 | Map capture | floating log opens automatically and remains accessible |
+| E35 | WindUI modal button layout | long button labels stack within dialog, never overflow |
+| E36 | Native saveinstance() | any "Decompiling scripts" progress belongs to executor-native save, not JSON export |
 
 For each run record: executor version, client FPS before/during/after, duration, number of visited/written objects, number of files, manifest status, and validation output. Avoid including player names in test logs.
 

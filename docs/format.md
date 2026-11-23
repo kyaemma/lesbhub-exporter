@@ -56,7 +56,7 @@ Header: `path,parentPath,name,className,depth,properties_json`. The `properties_
 ```json
 {
   "schemaVersion": 1,
-  "exporterVersion": "0.3.0",
+  "exporterVersion": "0.4.0",
   "clientOnly": true,
   "game": {
     "label": "Criminality",
