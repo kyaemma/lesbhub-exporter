@@ -313,7 +313,7 @@ function UI.open(Engine)
     local latestLog = capture:Code({
         Title = "Journal",
         Code = "Aucune capture active.",
-        Height = 180,
+        Height = UDim.new(0, 180),
         CanCopied = true,
     })
     local lastSummary = capture:Paragraph({
