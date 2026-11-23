@@ -143,6 +143,79 @@ class ExportFormatTests(unittest.TestCase):
         self.assertIn("continuous", ui)
         self.assertIn("stopRequested", ui)
 
+    def write_categorized(self, folder: Path, format_name: str, malformed=False):
+        category, service = "scripts", "PlayerGui"
+        directory = folder / category / service
+        directory.mkdir(parents=True)
+        record = dict(self.RECORD)
+        record["name"] = "HUDController"
+        record["className"] = "LocalScript"
+        record["path"] = "PlayerGui/MainMenu/HUDController"
+        record["category"] = category
+        record["properties"] = {}
+        file = directory / ("p1-0001." + format_name)
+        if format_name == "json":
+            file.write_text(json.dumps({
+                "schemaVersion": 1, "service": service, "pass": 1,
+                "category": category if not malformed else "gui",
+                "records": [record],
+            }), encoding="utf-8")
+        elif format_name == "jsonl":
+            file.write_text(json.dumps(record) + "\\n", encoding="utf-8")
+        else:
+            with file.open("w", encoding="utf-8", newline="") as stream:
+                writer = csv.writer(stream)
+                writer.writerow(["path", "parentPath", "name", "className", "depth", "properties_json"])
+                writer.writerow([record["path"], record["parentPath"], record["name"],
+                                 record["className"], record["depth"], "{}"])
+        manifest = {
+            "schemaVersion": 1, "exporterVersion": "0.5.2",
+            "clientOnly": True, "game": {"label": "Fixture"},
+            "capturedAtUtc": "2026-11-24T12:00:00Z", "status": "complete",
+            "partialReasons": [], "layout": {"version": 2, "id": "categorized"},
+            "settings": {"format": format_name, "organizedOutput": True},
+            "stats": {"written": 1, "files": 1, "bytes": file.stat().st_size},
+            "services": {service: {"records": 1, "files": 1, "passes": 1}},
+            "categories": {category: {"records": 1, "files": 1,
+                                     "services": {service: {"records": 1, "files": 1}}}},
+        }
+        (folder / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+
+    def test_categorized_json(self):
+        with tempfile.TemporaryDirectory() as directory:
+            folder = Path(directory)
+            self.write_categorized(folder, "json")
+            self.assertEqual(validate_folder(folder), [])
+
+    def test_categorized_jsonl(self):
+        with tempfile.TemporaryDirectory() as directory:
+            folder = Path(directory)
+            self.write_categorized(folder, "jsonl")
+            self.assertEqual(validate_folder(folder), [])
+
+    def test_categorized_csv(self):
+        with tempfile.TemporaryDirectory() as directory:
+            folder = Path(directory)
+            self.write_categorized(folder, "csv")
+            self.assertEqual(validate_folder(folder), [])
+
+    def test_reject_wrong_categorized_header(self):
+        with tempfile.TemporaryDirectory() as directory:
+            folder = Path(directory)
+            self.write_categorized(folder, "json", malformed=True)
+            issues = validate_folder(folder)
+            self.assertTrue(any("category header mismatch" in issue for issue in issues), issues)
+
+    def test_reject_duplicate_or_missing_nested_chunks(self):
+        with tempfile.TemporaryDirectory() as directory:
+            folder = Path(directory)
+            self.write_categorized(folder, "json")
+            first = folder / "scripts" / "PlayerGui" / "p1-0001.json"
+            first.rename(folder / "scripts" / "PlayerGui" / "p1-0002.json")
+            issues = validate_folder(folder)
+            self.assertTrue(any("missing/duplicate chunk indexes" in issue
+                                for issue in issues), issues)
+
     def test_missing_manifest(self):
         with tempfile.TemporaryDirectory() as directory:
             errors = validate_folder(Path(directory))
