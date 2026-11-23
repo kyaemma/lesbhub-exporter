@@ -83,7 +83,7 @@ function UI.open(Engine)
         Icon = "database",
         NewElements = true,
         HideSearchBar = true,
-        ToggleKey = Enum.KeyCode.RightShift,
+        -- The WindUI Keybind element owns the shortcut; avoid double toggles.
         OpenButton = {Enabled = true, Title = "Lesbhub Exporter"},
     })
 
@@ -554,11 +554,9 @@ function UI.open(Engine)
         Title = "Afficher / masquer", Value = "RightShift",
         Desc = "Touche par défaut : Maj droite.",
         Blacklist = {"Unknown", "Escape"},
-        Callback = function(value)
-            if destroyed then return end
-            local key = Enum.KeyCode[value]
-            if key and key ~= Enum.KeyCode.Unknown then
-                Window:SetToggleKey(key)
+        Callback = function(_key)
+            if not destroyed and not Window.Destroyed then
+                Window:Toggle()
             end
         end,
     })
