@@ -53,3 +53,9 @@ jobs:
           python scripts/build_mock_ui.py /tmp/lesbhub-ui-smoke.luau
           /tmp/luau/luau-compile /tmp/lesbhub-ui-smoke.luau > /dev/null
           /tmp/luau/luau /tmp/lesbhub-ui-smoke.luau
+      - name: Validate optional Cobalt plugin
+        run: |
+          /tmp/luau/luau-compile integrations/cobalt/LesbhubRemoteObserver.luau > /dev/null
+          /tmp/luau/luau-compile tests/mock_cobalt.luau > /dev/null
+          python scripts/build_mock_cobalt.py /tmp/lesbhub-cobalt-smoke.luau
+          /tmp/luau/luau /tmp/lesbhub-cobalt-smoke.luau
