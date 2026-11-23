@@ -485,6 +485,7 @@ function UI.open(Engine, restore)
         config.targets = {}
         for _, service in ipairs(Engine.TARGETS) do config.targets[service] = true end
     end
+    if config.organizedOutput == nil then config.organizedOutput = true end
     local presetKey = restore.preset or "max"
     local running, control, destroyed, nativeBusy = false, nil, false, false
     local runningMode = nil
