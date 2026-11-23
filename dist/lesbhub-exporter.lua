@@ -254,8 +254,13 @@ local function collectProperties(instance, cfg, state)
         elseif ASSET_PROPERTIES[property] then
             allowed = cfg.assets
         elseif property == "Value" then
-            allowed = cfg.worldProperties and
-                (class ~= "StringValue" or (cfg.stringValues and not sensitiveStringValue))
+            if class == "StringValue" then
+                -- Text values have their own privacy setting, independently
+                -- of world geometry/layout property collection.
+                allowed = cfg.stringValues and not sensitiveStringValue
+            else
+                allowed = cfg.worldProperties
+            end
         elseif unique[property] == "gui" then
             allowed = cfg.guiProperties
         else
@@ -987,6 +992,15 @@ function UI.open(Engine)
         Title = "Max informations",
         Desc = PRESET_DESCRIPTIONS["Max informations"],
     })
+    local applyPreset
+    options:Dropdown({
+        Title = "Mode d'export",
+        Values = {"Max informations", "Smart", "Fast"},
+        Value = "Max informations",
+        Callback = function(value)
+            if applyPreset then applyPreset(optionName(value)) end
+        end,
+    })
     local advanced = options:Section({
         Title = "Advanced",
         Desc = "Réglages détaillés (fermé par défaut)",
@@ -1037,7 +1051,7 @@ function UI.open(Engine)
         Desc = "La profondeur, le nombre total d'objets et le volume d'export ne sont pas limités. Chunk et yield ne limitent que le travail par étape.",
     })
 
-    local function applyPreset(name)
+    applyPreset = function(name)
         local chosen = PRESETS[name]
         if not chosen then return end
         applyingPreset = true
@@ -1055,12 +1069,6 @@ function UI.open(Engine)
             presetSummary:SetDesc(PRESET_DESCRIPTIONS[name])
         end)
     end
-    options:Dropdown({
-        Title = "Mode d'export",
-        Values = {"Max informations", "Smart", "Fast"},
-        Value = "Max informations",
-        Callback = function(value) applyPreset(optionName(value)) end,
-    })
 
     capture:Paragraph({
         Title = "Full export + GUI en une fois",
