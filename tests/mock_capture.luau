@@ -41,6 +41,7 @@ local storage = instance("ReplicatedStorage", "ReplicatedStorage", nil, {
         instance("GameStarted", "RemoteEvent"),
     }),
     instance("APIKey", "StringValue", {Value = "short-secret"}),
+    instance("BuildLabel", "StringValue", {Value = "modded-crim"}),
 })
 
 local http = {}
@@ -129,6 +130,24 @@ end
 assert(seenLabel and seenBox and seenSecret and seenAsset)
 assert(m.stats.assetReferences >= 1, "Asset references not counted")
 assert(not seenChat and not seenCharacter, "Chat or other players' character included")
+local stringOnly, stringOnlyError = Exporter.capture({
+    targets = {ReplicatedStorage = true}, worldProperties = false,
+    stringValues = true, twoPassGui = false,
+})
+assert(stringOnly, stringOnlyError)
+local foundBuildLabel = false
+for filename, chunk in pairs(writes) do
+    if filename:find(stringOnly.folder, 1, true) and filename:find("-p1-", 1, true) then
+        for _, record in ipairs(chunk.records or {}) do
+            if record.name == "BuildLabel" then
+                foundBuildLabel = true
+                assert(record.properties.Value == "modded-crim",
+                    "Fast preset should keep explicitly allowed StringValue data")
+            end
+        end
+    end
+end
+assert(foundBuildLabel, "Fixture StringValue was not captured")
 -- Legacy budget keys are ignored. Deep hierarchies and >500 nodes must be
 -- captured even when an older caller includes obsolete caps.
 local chain = instance("RootChain", "Folder")
