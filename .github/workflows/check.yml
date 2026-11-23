@@ -38,6 +38,11 @@ jobs:
         run: |
           curl --fail --silent --show-error --location https://raw.githubusercontent.com/kyaemma/lesbhub-ui/main/dist/main.lua --output /tmp/lesbhub-windui.lua
           grep -q "Lesbhub WindUI fork: fit dialog action buttons" /tmp/lesbhub-windui.lua
+          grep -q 'if not aw.User.Enabled then return "" end' /tmp/lesbhub-windui.lua
+          if grep -q 'aw.User.Anonymous and 1 or ak.LocalPlayer.UserId' /tmp/lesbhub-windui.lua; then
+            echo "Unsafe LocalPlayer access remains in compiled user panel"
+            exit 1
+          fi
           /tmp/luau/luau-compile /tmp/lesbhub-windui.lua > /dev/null
       - name: Run mock client smoke test
         run: |
