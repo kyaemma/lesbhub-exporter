@@ -11,7 +11,7 @@ import sys
 
 CHUNK_RE = re.compile(r"^([A-Za-z][A-Za-z0-9]*)-p([1-9][0-9]*)-([0-9]{4,})\.(json|jsonl|csv)$")
 REQUIRED_RECORD = {"path", "parentPath", "name", "className", "depth", "properties"}
-STATUSES = {"complete", "partial", "cancelled"}
+STATUSES = {"complete", "partial", "cancelled", "stopped", "recording"}
 
 
 def parse_chunk(path: Path, service: str, capture_pass: int, issues: list[str]):
