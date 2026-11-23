@@ -1,6 +1,7 @@
 -- WindUI mock smoke test: validate real UI callback wiring without Roblox.
 local shared = {}
 function getgenv() return shared end
+UDim = {new = function(scale, offset) return {Scale = scale, Offset = offset} end}
 local pending
 local lastWindow
 
@@ -125,6 +126,10 @@ local advanced = optionsTab:find("Section", "Advanced")
 assert(advanced and advanced.config.Opened == false, "Advanced should be collapsed")
 assert(modePicker, "Missing preset select")
 local capture = window.tabs.Capture
+local journal = capture:find("Code", "Journal")
+assert(journal and type(journal.config.Height) == "table"
+    and journal.config.Height.Scale == 0 and journal.config.Height.Offset == 180,
+    "WindUI Code.Height must be a UDim, not a number")
 local fullBtn = capture:find("Button", "Full export + GUI")
 assert(fullBtn, "Missing single Full export + GUI action")
 
