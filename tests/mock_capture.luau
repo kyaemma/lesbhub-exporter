@@ -32,7 +32,7 @@ local chat = instance("Chat", "ScreenGui", nil, {
     instance("Message", "TextLabel", {Text = "do not capture"}),
 })
 local gui = instance("PlayerGui", "PlayerGui", nil, {label, box, chat})
-local workspace = instance("Workspace", "Workspace", {StreamingEnabled = true}, {
+local world = instance("Workspace", "Workspace", {StreamingEnabled = true}, {
     instance("Map", "Folder"), otherCharacter,
 })
 local storage = instance("ReplicatedStorage", "ReplicatedStorage", nil, {
@@ -64,12 +64,12 @@ game = {
     GetService = function(_, name)
         if name == "Players" then return players end
         if name == "HttpService" then return http end
-        if name == "Workspace" then return workspace end
+        if name == "Workspace" then return world end
         if name == "ReplicatedStorage" then return storage end
         error("missing mock service " .. tostring(name))
     end,
 }
-_G.workspace = workspace
+workspace = world
 function makefolder(path) folders[path] = true end
 function isfolder(path) return folders[path] == true end
 function writefile(path, data)
