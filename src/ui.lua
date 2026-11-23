@@ -486,6 +486,9 @@ function UI.open(Engine, restore)
     local Window = windui:CreateWindow({
         Title = "Lesbhub Exporter", Folder = "lesbhub-exporter", Icon = "database",
         NewElements = true, HideSearchBar = true,
+        -- The exporter does not need a Roblox profile/thumbnail.
+        -- Avoid the optional user widget reading LocalPlayer during startup.
+        User = {Enabled = false, Anonymous = true},
         OpenButton = {Enabled = true, Title = "Lesbhub Exporter"},
     })
     local function alert(title, message)
