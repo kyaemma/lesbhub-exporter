@@ -332,23 +332,29 @@ end
 local function encodeChunk(records, format, service, pass)
     if format == "jsonl" then
         local lines = {}
-        for _, record in ipairs(records) do table.insert(lines, HttpService:JSONEncode(record)) end
+        for _, record in ipairs(records) do
+            local encoded = HttpService:JSONEncode(record)
+            -- Roblox encodes an empty Lua table as [] instead of {}.
+            table.insert(lines, encoded:gsub('"properties":%[%]', '"properties":{}'))
+        end
         return table.concat(lines, "\n") .. "\n"
     end
     if format == "csv" then
         local lines = {"path,parentPath,name,className,depth,properties_json"}
         for _, record in ipairs(records) do
             local values = {record.path, record.parentPath, record.name, record.className,
-                record.depth, HttpService:JSONEncode(record.properties)}
+                record.depth, HttpService:JSONEncode(record.properties) == "[]"
+                    and "{}" or HttpService:JSONEncode(record.properties)}
             for i, value in ipairs(values) do values[i] = csvEscape(value) end
             table.insert(lines, table.concat(values, ","))
         end
         return table.concat(lines, "\n") .. "\n"
     end
-    return HttpService:JSONEncode({
+    local encoded = HttpService:JSONEncode({
         schemaVersion = Exporter.SCHEMA_VERSION,
         service = service, pass = pass, records = records,
     })
+    return encoded:gsub('"properties":%[%]', '"properties":{}')
 end
 
 local function normalizedConfig(input)
