@@ -699,6 +699,7 @@ function UI.open(Engine, restore)
         end})
 
     settings:Paragraph({Title = t("setting_intro"), Desc = t("setting_desc")})
+    local shortcutWidget
     settings:Dropdown({
         Title = t("language"), Desc = t("language_desc"),
         Values = {"English", "Français"},
@@ -721,7 +722,6 @@ function UI.open(Engine, restore)
             end)
         end,
     })
-    local shortcutWidget
     shortcutWidget = settings:Keybind({
         Title = t("keybind"), Value = restore.shortcut or "RightShift",
         Desc = t("keybind_desc"), Blacklist = {"Unknown", "Escape"},
