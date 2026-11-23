@@ -479,78 +479,97 @@ function Exporter.capture(options, onProgress, control)
             {visited = 0, records = 0, files = 0, passes = 0}
         state.services[serviceName].passes = state.services[serviceName].passes + 1
 
-        -- Iterative depth-first scan: memory is tied to the current frontier,
-        -- not to every object already encountered, and no depth is excluded.
-        local stack = {{instance = root, depth = 0, path = serviceName, parent = ""}}
-        local records, part = {}, 1
+        -- Lazy DFS frames avoid building paths for thousands of siblings at once.
+        -- Each loop processes at most one object OR one child; the yield cadence
+        -- applies to both object collection and sibling enumeration.
+        local stack = {{
+            instance = root, depth = 0, path = serviceName, parent = "",
+            entered = false,
+        }}
+        local records, part, steps = {}, 1, 0
         local seen = setmetatable({}, {__mode = "k"})
         state.currentService = serviceName
         state.currentPass = pass
         state.discovered = state.discovered + 1
-        state.pending = #stack
-
+        state.pending = math.max(0, state.discovered - state.visited)
         notify(onProgress, "service_start", state, serviceName)
+
         while #stack > 0 do
             if stopCheck() then break end
-            local entry = table.remove(stack)
-            local obj = entry.instance
-            if not seen[obj] then
-                seen[obj] = true
-                state.visited = state.visited + 1
-                state.services[serviceName].visited = state.services[serviceName].visited + 1
-                local okClass, class = pcall(function() return obj.ClassName end)
-                if not okClass then class = "Unknown" end
-                local name = entry.depth == 0 and serviceName or readName(obj, cfg, state)
-                state.currentPath = entry.path
-                state.currentClass = class
-                local properties = collectProperties(obj, cfg, state)
-                table.insert(records, {
-                    name = name, className = class, path = entry.path,
-                    parentPath = entry.parent, depth = entry.depth, properties = properties,
-                })
-                state.classes[class] = (state.classes[class] or 0) + 1
+            local frame = stack[#stack]
 
-                if #records >= cfg.chunkSize then
-                    if not flush(records, serviceName, pass, part) then
-                        state.stopped = true
-                        break
-                    end
-                    records = {}
-                    part = part + 1
-                end
-
-                local okChildren, children = pcall(function() return obj:GetChildren() end)
-                if not okChildren then
-                    addError(state, "children_unavailable:" .. class)
-                    partial("children_unavailable")
+            if not frame.entered then
+                frame.entered = true
+                local obj = frame.instance
+                if seen[obj] then
+                    -- Object moved during traversal; do not count a duplicate.
+                    state.discovered = state.discovered - 1
+                    stack[#stack] = nil
                 else
-                    local siblingCounts = {}
-                    local nextEntries = {}
-                    for _, child in ipairs(children) do
-                        if not isForbidden(child, serviceName, state) then
-                            local segment = readName(child, cfg, state):gsub("[./\\]", "_")
-                            siblingCounts[segment] = (siblingCounts[segment] or 0) + 1
-                            local suffix = siblingCounts[segment] > 1 and ("~" .. siblingCounts[segment]) or ""
-                            table.insert(nextEntries, {
-                                instance = child, depth = entry.depth + 1,
-                                path = entry.path .. "/" .. segment .. suffix,
-                                parent = entry.path,
-                            })
+                    seen[obj] = true
+                    state.visited = state.visited + 1
+                    state.services[serviceName].visited = state.services[serviceName].visited + 1
+
+                    local okClass, class = pcall(function() return obj.ClassName end)
+                    if not okClass then class = "Unknown" end
+                    local name = frame.depth == 0 and serviceName or readName(obj, cfg, state)
+                    state.currentPath = frame.path
+                    state.currentClass = class
+                    local properties = collectProperties(obj, cfg, state)
+                    table.insert(records, {
+                        name = name, className = class, path = frame.path,
+                        parentPath = frame.parent, depth = frame.depth, properties = properties,
+                    })
+                    state.classes[class] = (state.classes[class] or 0) + 1
+                    if #records >= cfg.chunkSize then
+                        if not flush(records, serviceName, pass, part) then
+                            state.stopped = true
+                            break
                         end
+                        records = {}
+                        part = part + 1
                     end
-                    for i = #nextEntries, 1, -1 do
-                        stack[#stack + 1] = nextEntries[i]
-                        state.discovered = state.discovered + 1
+
+                    local okChildren, children = pcall(function() return obj:GetChildren() end)
+                    if not okChildren then
+                        addError(state, "children_unavailable:" .. class)
+                        partial("children_unavailable")
+                    else
+                        frame.children = children
+                        frame.nextChild = 1
+                        frame.siblingCounts = {}
+                        state.discovered = state.discovered + #children
                     end
                 end
+            elseif frame.children and frame.nextChild <= #frame.children then
+                local child = frame.children[frame.nextChild]
+                frame.nextChild = frame.nextChild + 1
+                if isForbidden(child, serviceName, state) then
+                    state.discovered = state.discovered - 1
+                else
+                    local segment = readName(child, cfg, state):gsub("[./\\]", "_")
+                    local counts = frame.siblingCounts
+                    counts[segment] = (counts[segment] or 0) + 1
+                    local suffix = counts[segment] > 1 and ("~" .. counts[segment]) or ""
+                    stack[#stack + 1] = {
+                        instance = child, depth = frame.depth + 1,
+                        path = frame.path .. "/" .. segment .. suffix,
+                        parent = frame.path, entered = false,
+                    }
+                end
+            else
+                stack[#stack] = nil
             end
-            state.pending = #stack
-            if state.visited % cfg.yieldEvery == 0 then
+
+            state.pending = math.max(0, state.discovered - state.visited)
+            steps = steps + 1
+            if steps % cfg.yieldEvery == 0 then
                 notify(onProgress, "scanning", state, serviceName)
                 task.wait()
             end
         end
-        -- A manual cancellation preserves already-inspected, not-yet-flushed records.
+
+        -- A manual cancellation still preserves pending buffered records.
         if #records > 0 and (not state.stopped or state.cancelled) then
             if not flush(records, serviceName, pass, part) then state.stopped = true end
         end
