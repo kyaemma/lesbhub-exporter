@@ -1,7 +1,7 @@
 -- Lesbhub Exporter V1 - client-side, read-only capture engine.
 -- No script source, remote invocation, executor introspection, or network upload.
 local Exporter = {}
-Exporter.VERSION = "0.2.0"
+Exporter.VERSION = "0.2.1"
 Exporter.SCHEMA_VERSION = 1
 Exporter.TARGETS = {
     "ReplicatedStorage", "ReplicatedFirst", "StarterGui", "PlayerGui",
@@ -41,8 +41,9 @@ local GUI_CLASSES = {
 }
 local OTHER_CLASSES = {
     Workspace = {"StreamingEnabled", "Gravity"},
-    BasePart = {"Size", "Material", "Transparency", "Anchored", "CanCollide", "Color"},
+    BasePart = {"Size", "Position", "CFrame", "Orientation", "Material", "Transparency", "Anchored", "CanCollide", "Color"},
     MeshPart = {"MeshId", "TextureID"},
+    Model = {"WorldPivot", "PrimaryPart"},
     SpecialMesh = {"MeshId", "TextureId", "MeshType", "Scale"},
     Decal = {"Texture", "Transparency", "Color3"},
     Texture = {"Texture", "Transparency", "Color3"},
@@ -168,6 +169,15 @@ local function serialize(value, cfg, state)
     end
     if t == "Vector2" then return {x = value.X, y = value.Y} end
     if t == "Vector3" then return {x = value.X, y = value.Y, z = value.Z} end
+    if t == "CFrame" then
+        -- Flat numeric transform (position + orthonormal 3x3 rotation matrix).
+        -- 12 numbers preserve the client-visible map orientation.
+        local components = {value:GetComponents()}
+        for _, n in ipairs(components) do
+            if type(n) ~= "number" or n ~= n or math.abs(n) == math.huge then return nil end
+        end
+        return components
+    end
     if t == "UDim" then return {scale = value.Scale, offset = value.Offset} end
     if t == "UDim2" then
         return {xScale = value.X.Scale, xOffset = value.X.Offset, yScale = value.Y.Scale, yOffset = value.Y.Offset}
@@ -177,7 +187,7 @@ local function serialize(value, cfg, state)
     end
     if t == "NumberRange" then return {min = value.Min, max = value.Max} end
     if t == "BrickColor" then return value.Name end
-    -- Intentionally skip Instance, CFrame, connections, functions and unbounded tables.
+    -- Intentionally skip Instance references, connections, functions and unbounded tables.
     return nil
 end
 
@@ -438,22 +448,91 @@ function Exporter.capture(options, onProgress, control)
         return state.stopped
     end
 
-    local function flush(records, serviceName, pass, part)
+    local chunkIndexes = {}
+
+    local function asciiFallback(value)
+        -- Preserve UTF-8 bytes reversibly when an executor's JSON encoder
+        -- rejects a particular string (e.g. malformed UTF-8).
+        return (tostring(value or ""):gsub("[^ -~]", function(char)
+            return string.format("~%02X", string.byte(char))
+        end))
+    end
+
+    local function safeText(value)
+        local ok = pcall(function() return HttpService:JSONEncode(tostring(value or "")) end)
+        return ok and tostring(value or "") or asciiFallback(value)
+    end
+
+    local function repairRecord(record)
+        local fixed = {
+            name = safeText(record.name),
+            className = safeText(record.className),
+            path = safeText(record.path),
+            parentPath = safeText(record.parentPath),
+            depth = record.depth,
+            properties = {},
+        }
+        for key, value in pairs(record.properties or {}) do
+            local safeKey = safeText(key)
+            local ok = pcall(function()
+                HttpService:JSONEncode({[safeKey] = value})
+            end)
+            if not ok then
+                if typeof(value) == "string" then
+                    value = asciiFallback(value)
+                    ok = pcall(function() HttpService:JSONEncode({[safeKey] = value}) end)
+                end
+                if not ok then
+                    value = "[serialization-unavailable]"
+                    partial("property_serialization_error")
+                    addError(state, "property_encode_failed:" .. tostring(record.className) .. "." .. tostring(key))
+                end
+            end
+            fixed.properties[safeKey] = value
+        end
+        return fixed
+    end
+
+    local function flush(records, serviceName, pass)
         if #records == 0 then return true end
         local okEncode, encoded = pcall(encodeChunk, records, cfg.format, serviceName, pass)
-        if not okEncode then
-            addError(state, "json_encode_failed:" .. serviceName)
-            partial("encoding_error")
-            return false
+        if not okEncode and #records > 1 then
+            -- A single invalid record must not kill all following services.
+            -- Binary split also helps with executor-specific chunk size limits.
+            local half = math.floor(#records / 2)
+            local left, right = {}, {}
+            for i = 1, half do left[#left + 1] = records[i] end
+            for i = half + 1, #records do right[#right + 1] = records[i] end
+            local okLeft = flush(left, serviceName, pass)
+            local okRight = okLeft and flush(right, serviceName, pass)
+            return okLeft and okRight
         end
+        if not okEncode then
+            local fixed = repairRecord(records[1])
+            okEncode, encoded = pcall(encodeChunk, {fixed}, cfg.format, serviceName, pass)
+            if not okEncode then
+                fixed.properties = {}
+                okEncode, encoded = pcall(encodeChunk, {fixed}, cfg.format, serviceName, pass)
+            end
+            if not okEncode then
+                addError(state, "record_encode_failed:" .. serviceName)
+                partial("encoding_error")
+                return false
+            end
+            partial("record_serialization_recovered")
+            addError(state, "record_serialization_recovered:" .. serviceName)
+        end
+
+        local key = serviceName .. "/p" .. tostring(pass)
+        local part = (chunkIndexes[key] or 0) + 1
         local ext = cfg.format == "json" and "json" or cfg.format
         local filename = string.format("%s/%s-p%d-%04d.%s", base, serviceName, pass, part, ext)
-        local ok = pcall(writefile, filename, encoded)
-        if not ok then
+        if not pcall(writefile, filename, encoded) then
             addError(state, "write_failed:" .. serviceName)
             partial("write_error")
             return false
         end
+        chunkIndexes[key] = part
         state.bytes = state.bytes + #encoded
         state.fileCount = state.fileCount + 1
         state.written = state.written + #records
@@ -482,7 +561,7 @@ function Exporter.capture(options, onProgress, control)
             instance = root, depth = 0, path = serviceName, parent = "",
             entered = false,
         }}
-        local records, part, steps = {}, 1, 0
+        local records, steps = {}, 0
         local seen = setmetatable({}, {__mode = "k"})
         state.currentService = serviceName
         state.currentPass = pass
@@ -518,12 +597,11 @@ function Exporter.capture(options, onProgress, control)
                     })
                     state.classes[class] = (state.classes[class] or 0) + 1
                     if #records >= cfg.chunkSize then
-                        if not flush(records, serviceName, pass, part) then
+                        if not flush(records, serviceName, pass) then
                             state.stopped = true
                             break
                         end
                         records = {}
-                        part = part + 1
                     end
 
                     local okChildren, children = pcall(function() return obj:GetChildren() end)
@@ -567,7 +645,7 @@ function Exporter.capture(options, onProgress, control)
 
         -- A manual cancellation still preserves pending buffered records.
         if #records > 0 and (not state.stopped or state.cancelled) then
-            if not flush(records, serviceName, pass, part) then state.stopped = true end
+            if not flush(records, serviceName, pass) then state.stopped = true end
         end
         state.pending = 0
         notify(onProgress, "service_done", state, serviceName)
@@ -661,6 +739,19 @@ function Exporter.capture(options, onProgress, control)
     end
     notify(onProgress, "done", state, manifest.status)
     return {folder = base, manifest = manifest}
+end
+
+-- Optional native place export, only after an explicit UI action.
+-- Like Infinite Yield's savegame command, this delegates to the executor.
+-- It is intentionally separate from the read-only JSON capture and can
+-- include data outside our privacy-filtered allowlist.
+function Exporter.savePlace()
+    if type(saveinstance) ~= "function" then
+        return false, "saveinstance() is not available in this executor"
+    end
+    local ok, result = pcall(saveinstance)
+    if not ok then return false, tostring(result) end
+    return true, result
 end
 
 return Exporter
