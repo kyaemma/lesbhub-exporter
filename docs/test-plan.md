@@ -49,6 +49,12 @@ Potassium live results (modded Criminality variant, 2026-11-23): GUI-only captur
 | E43 | Long recording / forced disconnect | periodically updated manifest uses `status=recording`; no indefinite in-memory accumulation of entire event history |
 | E44 | Capture UI colors | start/full/stop/cancel visually distinct from informational sections |
 | E45 | No game-specific prompts | no references to specific experience interfaces in source or UI |
+| E46 | Categorized output default | scripts/PlayerGui, gui/PlayerGui, remotes/ReplicatedStorage and world/Workspace are distinct when populated |
+| E47 | UI script metadata | LocalScript under GUI saved to scripts/PlayerGui with unchanged path, no Source |
+| E48 | Categorized manifests | category and service file/record counts match all chunks |
+| E49 | Flat legacy output | original filenames preserved, no collision when multiple categories share service/pass |
+| E50 | Categorized JSON/JSONL/CSV validator | recursive verification accepts each format and rejects a wrong category or missing chunk |
+| E51 | Continuous categorized capture | add/update/remove records retain their type folder; final Stop & Save manifest reconciles |
 
 For each run record: executor version, client FPS before/during/after, duration, number of visited/written objects, number of files, manifest status, and validation output. Avoid including player names in test logs.
 

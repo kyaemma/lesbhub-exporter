@@ -6,7 +6,7 @@ The UI is built with our [Lesbhub WindUI fork](https://github.com/kyaemma/lesbhu
 
 ## Status
 
-**v0.5.0: universal continuous capture, Stop & Save and clearer action buttons.** Earlier Potassium captures have demonstrated large exports; the most recent screenshots show 223.7K objects, 44.7K asset references and a 60.3-second run (partial status, reason not yet confirmed from its manifest). This UI update is validated with Luau and Python automated tests, including a simulated floating journal. A visual Potassium retest is still needed.
+**v0.5.2: organized export folders by type and Roblox service.** Earlier Potassium captures have demonstrated large exports; the most recent screenshots show 223.7K objects, 44.7K asset references and a 60.3-second run (partial status, reason not yet confirmed from its manifest). This UI update is validated with Luau and Python automated tests, including a simulated floating journal. A visual Potassium retest is still needed.
 
 ## Run from a supported Roblox client environment
 
@@ -23,7 +23,8 @@ For offline/manual distribution, use `dist/lesbhub-exporter.lua` (but the UI sti
 - **Targets:** ReplicatedStorage, ReplicatedFirst, StarterGui, PlayerGui, StarterPlayer, PlayerScripts, StarterPack, Workspace, Lighting, SoundService, Teams.
 - **Targets:** multi-select searchable dropdown, with **all services selected by default**, plus one-click presets for all, GUI-only and game structures.
 - **Properties:** names, classes, parent/child paths, depth, GUI labels/text/buttons, TextBox placeholders, visual styles, asset IDs, selected world properties and basic values.
-- **Formats:** chunked JSON, JSONL or CSV; one **manifest.json** per capture, with settings, counts, status, errors, and partial reasons.
+- **Formats:** chunked JSON, JSONL or CSV; one **manifest.json** per capture, with settings, counts, status, errors, partial reasons, and category totals.
+- **Organized datasets:** by default, records are grouped by type (`gui`, `scripts`, `remotes`, `world`, `values`, `assets`, `structures`, `other`) and by Roblox service. UI scripts live under `scripts/PlayerGui/`, while UI widgets go under `gui/PlayerGui/`. Full original paths and parent relationships are preserved. The legacy flat layout remains selectable in Dataset.
 - **One-time full export + GUI:** one action for structures and guided GUI snapshots (4 passes by default in Max information). Open and close any UI elements during the guided passes; no game-specific menu names or automation.
 - **Continuous capture:** starts with an exhaustive snapshot, then watches new/removed client instances and periodically compares GUI snapshots, saving only added, updated or removed records. Continues until **Stop & Save** or Cancel. A final GUI sweep is performed when stopped. No duration or global size cap.
 - **Capture controls:** visually distinct tinted primary action buttons (blue for full export, teal for continuous, amber for Stop & Save, dark secondary actions, red for Cancel).
@@ -33,9 +34,33 @@ For offline/manual distribution, use `dist/lesbhub-exporter.lua` (but the UI sti
 - **Performance:** iterative depth-first traversal, periodic `task.wait()`, small chunk files, cancellation and no global depth/object/total-byte/string-length cap.
 - **Privacy:** skips other players' characters, chat GUI, `CoreGui` and script source. All UI presets **enable** TextBox.Text and StringValue.Value for local research; every capture requires acknowledging a private-data warning. Redaction of known player names and common token patterns remains best-effort.
 
-## WindUI interface (v0.5)
+## WindUI interface (v0.5.2)
 
 The interface defaults to **English**. The new **Home** tab provides shortcuts to Full export + GUI, GUI-only capture, map export, the floating log, Targets and Options.
+
+### File organization (v0.5.2)
+
+**Dataset → File organization → Categorized folders** is selected by default. If an older analyzer expects `<Service>-p<pass>-<chunk>.json` files directly in the run folder, choose **Flat (legacy)** instead.
+
+Categorized output:
+
+```text
+LesbhubExporter/<category>/<game>/<variant>/<capture-id>/
+  manifest.json
+  gui/PlayerGui/p1-0001.json
+  gui/StarterGui/p1-0001.json
+  scripts/PlayerGui/p1-0001.json
+  scripts/ReplicatedStorage/p1-0001.json
+  remotes/ReplicatedStorage/p1-0001.json
+  values/ReplicatedStorage/p1-0001.json
+  world/Workspace/p1-0001.json
+  assets/ReplicatedStorage/p1-0001.json
+  structures/ReplicatedStorage/p1-0001.json
+```
+
+Each object is stored in **one** type category; `path` and `parentPath` still reference the original Roblox hierarchy, not the filesystem. Not every category exists in every game. The `scripts` folder contains only script object metadata and **does not export script sources**. The `assets` folder contains asset-bearing instances, not downloaded image/sound binaries. The `manifest.json` contains the per-category and per-service record/file counts.
+
+This layout works with full scans, guided GUI passes and continuous `add/update/remove` deltas. To validate old or new exports: `python scripts/validate_export.py <run-directory>`.
 
 ### Language and persistence
 
@@ -89,7 +114,7 @@ LesbhubExporter/
           PlayerGui-p2-0001.json
 ```
 
-The timestamp and clock suffix are **run identifiers**, not signature material. Each object is a flat record with `name`, `className`, `path`, `parentPath`, `depth`, and `properties`. See [schema](docs/format.md).
+The timestamp and clock suffix are **run identifiers**, not signature material. The sample below shows the legacy **Flat** layout; the categorized layout above is the new default. Each object is a flat record with `name`, `className`, `path`, `parentPath`, `depth`, and `properties`. See [schema](docs/format.md).
 
 **Note:** The default 200 records per file is **only chunking, not a limit**. The output may have thousands of files if the client can see many objects. JSON chunks are not monolithic. A later analyzer must process all chunks and treat GUI passes as separate snapshots.
 
@@ -98,7 +123,7 @@ The timestamp and clock suffix are **run identifiers**, not signature material. 
 ## Capture procedure
 
 1. Start a Roblox session and launch the exporter. Enter a game label, category and variant.
-2. Select target services and output format. Use GUI-only for targeted interface studies or full client for broad structural comparisons.
+2. Select target services, output format, and **Categorized folders** (recommended) or **Flat (legacy)** in Dataset. Use GUI-only for targeted interface studies or full client for broad structural comparisons.
 3. In **Options**, choose **Max information**, **Smart** or **Fast**. Use **Advanced** only if you want to customize details. **Full export + GUI** includes guided GUI snapshots. You can open any in-game menu during capture; no special interface is assumed. For longer exploration, choose **Start continuous capture**, then press **Stop & Save** when finished.
 4. Read and accept the **local-data privacy confirmation** before the capture starts. Then review the `manifest.json` (especially `status`, `partialReasons` and counts), and validate the directory:
    ```powershell

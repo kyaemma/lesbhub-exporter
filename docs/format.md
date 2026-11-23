@@ -1,12 +1,15 @@
-# Dataset format v1
+# Dataset format v1 (categorized layout v2)
 
-The exporter writes one `manifest.json` and one or more chunk files per service and capture pass.
+The exporter writes one `manifest.json` and chunk files. The **record schema remains v1**, but there are two filesystem layouts:
 
-```text
-<Service>-p<pass>-<chunk:04d>.<format>
-```
+- **Categorized v2 (default)**: `<category>/<service>/p<pass>-<chunk:04d>.<format>`
+- **Flat v1 (compatibility)**: `<service>-p<pass>-<chunk:04d>.<format>`
 
-`Service` is selected from the exporter's fixed target list; `pass` starts at `1` and may increase (guided GUI snapshots, up to the configured count). `chunk` starts at 1 per service/pass, padded to at least four digits (e.g. `0001`, `10000`).
+For example, `scripts/PlayerGui/p1-0001.json` contains metadata for scripts nested inside PlayerGui, and `gui/PlayerGui/p1-0001.json` contains GUI instances. The dataset remains one logical tree: record `path` and `parentPath` are **never rewritten** to match the folders.
+
+Categories are `scripts`, `gui`, `remotes`, `values`, `world`, `assets`, `structures` and `other`. An instance belongs to exactly one category. Folders are only created if the category contains records.
+
+`chunk` starts at 1 per category/service/pass in v2 or service/pass in flat v1; files may exceed four digits. `pass` starts at 1 and increases for guided snapshots or continuous deltas.
 
 ## Record
 
@@ -39,6 +42,7 @@ Each `.json` chunk contains:
   "schemaVersion": 1,
   "service": "PlayerGui",
   "pass": 1,
+  "category": "gui",
   "records": []
 }
 ```
@@ -49,14 +53,14 @@ Each line is exactly one JSON object with the record schema. There is no top-lev
 
 ### CSV
 
-Header: `path,parentPath,name,className,depth,properties_json`. The `properties_json` column contains a **JSON-encoded object** safely CSV-quoted. Each chunk has its own header.
+Header: `path,parentPath,name,className,depth,properties_json`. The `properties_json` column contains a **JSON-encoded object** safely CSV-quoted. Each chunk has its own header. In categorized CSV/JSONL, the category is inferred from the folder name; JSON includes `category` in the chunk header, and JSON/JSONL records also carry it.
 
 ## Manifest
 
 ```json
 {
   "schemaVersion": 1,
-  "exporterVersion": "0.5.0",
+  "exporterVersion": "0.5.2",
   "clientOnly": true,
   "game": {
     "label": "Criminality",
@@ -75,8 +79,14 @@ Header: `path,parentPath,name,className,depth,properties_json`. The `properties_
   "services": {
     "ReplicatedStorage": {"visited": 1000, "records": 1000, "files": 5, "passes": 1}
   },
+  "layout": {"version": 2, "id": "categorized"},
+  "categories": {
+    "remotes": {"records": 120, "files": 1,
+                "services": {"ReplicatedStorage": {"records": 120, "files": 1}}}
+  },
   "errors": [],
-  "settings": {"format": "json", "captureMode": "exhaustive", "chunkSize": 200, "guiPasses": 3},
+  "settings": {"format": "json", "organizedOutput": true,
+               "captureMode": "exhaustive", "chunkSize": 200, "guiPasses": 3},
   "privacy": {},
   "notes": []
 }
