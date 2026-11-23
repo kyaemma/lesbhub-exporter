@@ -201,6 +201,9 @@ function engine.savePlace() return true, "mock-save.rbxl" end
 local UI = require("../src/ui")
 local window = UI.open(engine)
 assert(window == lastWindow and shared.LesbhubExporterHandle)
+assert(window.options.User and window.options.User.Enabled == false
+    and window.options.User.Anonymous == true,
+    "Exporter must not require a Roblox LocalPlayer thumbnail")
 assert(window.tabs.Home, "Default locale must be English")
 assert(window.tabs.Home:find("Button", "Full export + GUI"), "Home quick export absent")
 assert(window.tabs.Home:find("Button", "Open activity window"), "Home log shortcut absent")
