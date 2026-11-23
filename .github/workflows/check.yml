@@ -35,4 +35,6 @@ jobs:
           /tmp/luau/luau-compile dist/lesbhub-exporter.lua > /dev/null
           /tmp/luau/luau-compile tests/mock_capture.luau > /dev/null
       - name: Run mock client smoke test
-        run: /tmp/luau/luau tests/mock_capture.luau
+        run: |
+          python scripts/build_mock.py /tmp/lesbhub-smoke.luau
+          /tmp/luau/luau /tmp/lesbhub-smoke.luau
