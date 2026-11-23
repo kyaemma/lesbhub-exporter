@@ -155,3 +155,61 @@ assert(extra.manifest.stats.visited >= 598, "A legacy node/depth cap truncated t
 assert(extra.manifest.stats.written == extra.manifest.stats.visited)
 assert(extra.manifest.settings.captureMode == "exhaustive")
 print("Luau smoke test OK: uncapped traversal, " .. extra.manifest.stats.visited .. " records")
+
+-- A single invalid text byte used to abort a full ReplicatedStorage export.
+-- The engine now recursively isolates the bad chunk and repairs the record.
+local function hasInvalidByte(value)
+    if type(value) == "string" then
+        return value:find(string.char(255), 1, true) ~= nil
+    end
+    if type(value) == "table" then
+        for k, v in pairs(value) do
+            if hasInvalidByte(k) or hasInvalidByte(v) then return true end
+        end
+    end
+    return false
+end
+local previousEncode = http.JSONEncode
+function http:JSONEncode(value)
+    if hasInvalidByte(value) then error("JSON encode rejects invalid UTF-8") end
+    return previousEncode(self, value)
+end
+table.insert(gui._children, instance("BadText", "TextLabel", {
+    Text = "Invalid" .. string.char(255) .. "UTF8",
+}))
+local repaired, repairedError = Exporter.capture({
+    targets = {PlayerGui = true}, twoPassGui = false,
+    chunkSize = 25, yieldEvery = 20,
+})
+assert(repaired, repairedError)
+assert(repaired.manifest.stats.written == repaired.manifest.stats.visited,
+    "JSON recovery dropped objects")
+assert(repaired.manifest.status == "partial",
+    "Repaired encoding should be acknowledged in manifest")
+local foundRecovery = false
+for _, reason in ipairs(repaired.manifest.partialReasons) do
+    if reason == "record_serialization_recovered" then foundRecovery = true end
+end
+assert(foundRecovery, "Encoding recovery not reported")
+local savedBadText = false
+for path, value in pairs(writes) do
+    if path:find(repaired.folder, 1, true) and path:find("-p1-", 1, true) then
+        for _, record in ipairs(value.records or {}) do
+            if record.name == "BadText" then
+                savedBadText = true
+                assert(record.properties.Text:find("~FF", 1, true) ~= nil,
+                    "Invalid UTF-8 not escaped")
+            end
+        end
+    end
+end
+assert(savedBadText, "The recovered record was lost")
+
+-- Native saveinstance() must remain opt-in and executor-dependent.
+local nativeOk, nativeError = Exporter.savePlace()
+assert(nativeOk == false and type(nativeError) == "string")
+saveinstance = function() return "mock-executor-place.rbxl" end
+local savedNative, nativePath = Exporter.savePlace()
+assert(savedNative and nativePath == "mock-executor-place.rbxl")
+print("Luau smoke test OK: adaptive capture, JSON recovery and optional native save")
+
