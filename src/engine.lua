@@ -573,6 +573,9 @@ function Exporter.capture(options, onProgress, control)
             path = safeText(record.path),
             parentPath = safeText(record.parentPath),
             depth = record.depth,
+            category = record.category,
+            operation = record.operation,
+            observedAtUtc = record.observedAtUtc,
             properties = {},
         }
         for key, value in pairs(record.properties or {}) do
