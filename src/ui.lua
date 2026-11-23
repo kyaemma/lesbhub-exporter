@@ -76,6 +76,11 @@ local WORDS = {
     category = {"Category", "Catégorie"},
     variant = {"Variant", "Variante"},
     format = {"Format", "Format"},
+    output_layout = {"File organization", "Organisation des fichiers"},
+    layout_categorized = {"Categorized folders", "Dossiers classés par type"},
+    layout_flat = {"Flat (legacy)", "À plat (ancien format)"},
+    layout_desc = {"Groups instances by type and Roblox service. Script records are metadata only.",
+        "Classe les objets par type puis par service Roblox. Les scripts restent des métadonnées, sans code source."},
     target_intro = {"Roblox services", "Services Roblox"},
     target_desc = {"All available targets are selected by default. Search and select several in one menu.",
         "Toutes les cibles sont sélectionnées par défaut. Recherche et sélectionne plusieurs services dans un seul menu."},
@@ -476,6 +481,7 @@ function UI.open(Engine, restore)
     if not restore.config then
         config.label, config.category, config.variant = "Unlabeled", "Other", "Default"
         config.format = "json"
+        config.organizedOutput = true
         config.targets = {}
         for _, service in ipairs(Engine.TARGETS) do config.targets[service] = true end
     end
@@ -560,6 +566,14 @@ function UI.open(Engine, restore)
         Callback = function(value)
             local name = optionName(value):lower()
             if name == "json" or name == "jsonl" or name == "csv" then config.format = name end
+        end,
+    })
+    dataset:Dropdown({
+        Title = t("output_layout"), Desc = t("layout_desc"),
+        Values = {t("layout_categorized"), t("layout_flat")},
+        Value = config.organizedOutput ~= false and t("layout_categorized") or t("layout_flat"),
+        Callback = function(value)
+            config.organizedOutput = optionName(value) ~= t("layout_flat")
         end,
     })
 
