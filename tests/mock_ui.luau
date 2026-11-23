@@ -1,11 +1,16 @@
--- WindUI mock smoke test: validate real UI callback wiring without Roblox.
-local shared = {}
+-- Mock UI contract regression without Roblox; fork-specific rendering is validated live.
+local shared, saved = {}, {}
 function getgenv() return shared end
+function readfile(path)
+    assert(saved[path] ~= nil, "file not found")
+    return saved[path]
+end
+function writefile(path, content) saved[path] = content end
+function makefolder(_path) end
+function isfolder(_path) return true end
 UDim = {new = function(scale, offset) return {Scale = scale, Offset = offset} end}
-local pending
 local lastWindow
-
-local function element(config, kind)
+local function widget(config, kind)
     local item = {config = config, kind = kind, value = config.Value}
     function item:SetTitle(value) self.title = value end
     function item:SetDesc(value) self.desc = value end
@@ -18,14 +23,13 @@ local function element(config, kind)
     function item:Destroy() self.destroyed = true end
     return item
 end
-
-local function makeTab(name)
+local function createTab(name)
     local tab = {name = name, elements = {}}
     function tab:NewChild(kind, config)
-        local e = element(config or {}, kind)
+        local e = widget(config or {}, kind)
         table.insert(self.elements, e)
         if kind == "Section" then
-            local child = makeTab("Advanced")
+            local child = createTab("Advanced")
             e.children = child
             for _, method in ipairs({"Paragraph", "Toggle", "Slider", "Dropdown", "Button", "Input"}) do
                 e[method] = function(_, props) return child:NewChild(method, props) end
@@ -34,8 +38,8 @@ local function makeTab(name)
         return e
     end
     for _, method in ipairs({
-        "Paragraph", "Input", "Dropdown", "Toggle", "Button",
-        "Slider", "Section", "Code", "ProgressBar", "Keybind",
+        "Paragraph", "Input", "Dropdown", "Toggle", "Button", "Slider",
+        "Section", "Code", "ProgressBar", "Keybind",
     }) do
         tab[method] = function(self, config) return self:NewChild(method, config) end
     end
@@ -43,23 +47,20 @@ local function makeTab(name)
         for _, e in ipairs(self.elements) do
             if e.kind == kind and (not title or e.config.Title == title) then return e end
         end
-        return nil
     end
+    function tab:Select() self.selected = true end
     return tab
 end
 
 local windui = {}
 function windui:CreateWindow(options)
     local window = {tabs = {}, options = options, toggleCount = 0}
-    function window:Tab(props)
-        local tab = makeTab(props.Title)
-        self.tabs[props.Title] = tab
+    function window:Tab(cfg)
+        local tab = createTab(cfg.Title)
+        self.tabs[cfg.Title] = tab
         return tab
     end
-    function window:Dialog(props)
-        self.lastDialog = props
-        return props
-    end
+    function window:Dialog(cfg) self.lastDialog = cfg; return cfg end
     function window:OnDestroy(cb) self.onDestroy = cb end
     function window:Open() self.opened = true end
     function window:Toggle() self.toggleCount = self.toggleCount + 1 end
@@ -71,12 +72,14 @@ function windui:CreateWindow(options)
     lastWindow = window
     return window
 end
-function windui:Notify(cfg) pending = cfg end
+function windui:Notify(cfg) self.notice = cfg end
 function loadstring(_source) return function() return windui end end
-game = {HttpGet = function(_, _) return "WindUI mock" end}
-function writefile(_path, _data) end
-function makefolder(_path) end
-task = {spawn = function(callback) callback() end}
+game = {HttpGet = function() return "mock WindUI" end}
+task = {
+    spawn = function(callback) callback() end,
+    defer = function(callback) callback() end,
+    wait = function() end,
+}
 local engine = {
     TARGETS = {
         "ReplicatedStorage", "ReplicatedFirst", "StarterGui", "PlayerGui",
@@ -87,86 +90,96 @@ local engine = {
 }
 function engine.capture(cfg, onProgress, control)
     table.insert(engine.calls, cfg)
-    onProgress({
-        stage = "service_start", service = "PlayerGui", pass = 1,
+    onProgress({stage = "service_start", service = "PlayerGui", pass = 1,
         visited = 5, discovered = 9, written = 5, pending = 4,
-        files = 1, assetReferences = 3, elapsedSeconds = 0.1,
-    })
-    onProgress({
-        stage = "waiting_gui_pass", service = "PlayerGui", pass = 1,
+        files = 1, assetReferences = 3, elapsedSeconds = 0.1})
+    onProgress({stage = "waiting_gui_pass", service = "PlayerGui", pass = 1,
         visited = 5, discovered = 9, written = 5, pending = 4,
-        files = 1, assetReferences = 3, elapsedSeconds = 0.2,
-    })
-    onProgress({
-        stage = "service_done", service = "PlayerGui", pass = 1,
+        files = 1, assetReferences = 3, elapsedSeconds = 0.2})
+    onProgress({stage = "service_done", service = "PlayerGui", pass = 1,
         visited = 5, discovered = 9, written = 5, pending = 4,
-        files = 1, assetReferences = 3, elapsedSeconds = 0.3,
-    })
+        files = 1, assetReferences = 3, elapsedSeconds = 0.3})
     assert(control.cancelled == false)
-    return {
-        folder = "mock",
-        manifest = {status = "complete",
-            stats = {written = 100, files = 1, assetReferences = 3, elapsedSeconds = 0.3}},
-    }
+    return {folder = "mock-dataset", manifest = {status = "complete",
+        stats = {written = 100, files = 1, assetReferences = 3, elapsedSeconds = 0.3}}}
 end
-function engine.savePlace() return true, "mock" end
+function engine.savePlace() return true, "mock-save.rbxl" end
 
 local UI = require("../src/ui")
 local window = UI.open(engine)
 assert(window == lastWindow and shared.LesbhubExporterHandle)
-local targetTab = window.tabs.Targets
-local picker = targetTab:find("Dropdown", "Sélection multiple")
-assert(picker and picker.config.Multi == true)
-assert(#picker.value == #engine.TARGETS, "Targets should all be selected")
-assert(#targetTab.elements < 12, "Targets UI must not be one toggle per service")
+assert(window.tabs.Home, "Default locale must be English")
+assert(window.tabs.Home:find("Button", "Full export + GUI"), "Home quick export absent")
+assert(window.tabs.Home:find("Button", "Open activity window"), "Home log shortcut absent")
+local targets = window.tabs.Targets
+local picker = targets:find("Dropdown", "Select multiple")
+assert(picker and picker.config.Multi and #picker.value == #engine.TARGETS)
+assert(#targets.elements < 12, "Targets should not be a wall of toggles")
 
-local optionsTab = window.tabs.Options
-local modePicker = optionsTab:find("Dropdown", "Mode d'export")
-local advanced = optionsTab:find("Section", "Advanced")
-assert(advanced and advanced.config.Opened == false, "Advanced should be collapsed")
-assert(modePicker, "Missing preset select")
+local options = window.tabs.Options
+local modePicker = options:find("Dropdown", "Export preset")
+local advanced = options:find("Section", "Advanced")
+assert(advanced and advanced.config.Opened == false)
+assert(modePicker, "Preset dropdown missing")
 local capture = window.tabs.Capture
-local journal = capture:find("Code", "Journal")
-assert(journal and type(journal.config.Height) == "table"
-    and journal.config.Height.Scale == 0 and journal.config.Height.Offset == 180,
-    "WindUI Code.Height must be a UDim, not a number")
+assert(not capture:find("Code"), "Log must not live inside Capture tab")
 local fullBtn = capture:find("Button", "Full export + GUI")
-assert(fullBtn, "Missing single Full export + GUI action")
-
+assert(fullBtn)
 fullBtn.config.Callback()
-assert(#engine.calls == 0, "Capture must not start before privacy consent")
-assert(window.lastDialog and window.lastDialog.Content:find("Ne publie pas"), "Privacy notice missing")
+assert(#engine.calls == 0, "Capture started before consent")
+assert(window.lastDialog.Content:find("Do not publish", 1, true))
 window.lastDialog.Buttons[2].Callback()
-local config = engine.calls[1]
-assert(config and config.targets.PlayerGui and config.targets.StarterGui)
-assert(config.textboxValues == true and config.stringValues == true)
-assert(config.twoPassGui == true and config.guiPasses == 4)
-local progress = capture:find("ProgressBar")
-assert(progress and progress.config.Indeterminate == true and progress.destroyed,
-    "Unknown-total progress should animate only while scanning")
+local max = engine.calls[1]
+assert(max and max.targets.PlayerGui and max.targets.StarterGui)
+assert(max.twoPassGui and max.guiPasses == 4)
+assert(max.textboxValues and max.stringValues)
 
 modePicker:Set("Fast")
 fullBtn.config.Callback()
 window.lastDialog.Buttons[2].Callback()
 local fast = engine.calls[2]
 assert(fast.guiTexts and fast.assets and fast.twoPassGui and fast.guiPasses == 2)
-assert(fast.worldProperties == false and fast.textboxValues and fast.stringValues)
+assert(not fast.worldProperties and fast.textboxValues and fast.stringValues)
 
-targetTab:find("Button", "GUI uniquement").config.Callback()
+targets:find("Button", "GUI only").config.Callback()
 assert(#picker.value == 2)
 fullBtn.config.Callback()
 window.lastDialog.Buttons[2].Callback()
 local gui = engine.calls[3]
 assert(gui.targets.PlayerGui and gui.targets.StarterGui and not gui.targets.Workspace)
 
-local shortcut = window.tabs.Settings:find("Keybind", "Afficher / masquer")
+local map = window.tabs.Map
+map:find("Button", "Export map as JSON").config.Callback()
+window.lastDialog.Buttons[2].Callback()
+local mapCfg = engine.calls[4]
+assert(mapCfg.targets.Workspace and mapCfg.targets.Lighting and not mapCfg.targets.PlayerGui)
+
+local shortcut = window.tabs.Settings:find("Keybind", "Show / hide key")
 assert(shortcut and shortcut.config.Value == "RightShift")
 shortcut.config.Callback("RightShift")
-assert(window.toggleCount == 1, "Keybind must toggle exactly once")
-assert(window.options.ToggleKey == nil, "Built-in toggle handler would cause double toggle")
+assert(window.toggleCount == 1)
+assert(window.options.ToggleKey == nil, "Duplicate toggle handler installed")
 
-window.tabs.Settings:find("Button", "Unload GUI").config.Callback()
-assert(window.lastDialog.Title:find("Décharger"))
-window.lastDialog.Buttons[2].Callback()
-assert(window.Destroyed and not shared.LesbhubExporterHandle, "Unload did not clean UI handle")
-print("Luau WindUI mock smoke test OK: targets, presets, privacy, progress, bind, unload")
+-- Change language, persist it, recreate UI and preserve preset/target selections.
+local language = window.tabs.Settings:find("Dropdown", "Language / Langue")
+assert(language)
+language:Set("Français")
+assert(saved["LesbhubExporter/language.txt"] == "fr", "Locale not saved")
+local french = lastWindow
+assert(french ~= window and french.tabs.Accueil and french.tabs.Paramètres)
+assert(french.tabs.Accueil:find("Button", "Ouvrir la fenêtre du journal"))
+local frPreset = french.tabs.Options:find("Dropdown", "Preset d'export")
+assert(frPreset and frPreset.value == "Fast", "Preset lost on localization")
+local frPicker = french.tabs.Cibles:find("Dropdown", "Sélection multiple")
+assert(frPicker and #frPicker.value == 2)
+local frenchShortcut = french.tabs.Paramètres:find("Keybind", "Touche afficher / masquer")
+assert(frenchShortcut)
+
+french.tabs.Paramètres:find("Button", "Décharger la GUI").config.Callback()
+assert(french.lastDialog.Title:find("Décharger"))
+french.lastDialog.Buttons[2].Callback()
+assert(french.Destroyed and not shared.LesbhubExporterHandle, "Unload did not clear handle")
+
+local reloaded = UI.open(engine)
+assert(reloaded.tabs.Accueil, "Persisted French language not loaded")
+print("Luau UI mock OK: EN/FR, persistence, Home, privacy, full+GUI, map, keybind, unload")
