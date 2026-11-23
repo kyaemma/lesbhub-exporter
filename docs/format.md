@@ -6,7 +6,7 @@ The exporter writes one `manifest.json` and one or more chunk files per service 
 <Service>-p<pass>-<chunk:04d>.<format>
 ```
 
-`Service` is selected from the exporter's fixed target list; `pass` is `1` (initial) or `2` (optional delayed GUI rescan). `chunk` starts at 1 per service/pass.
+`Service` is selected from the exporter's fixed target list; `pass` starts at `1` and may increase (guided GUI snapshots, up to the configured count). `chunk` starts at 1 per service/pass, padded to at least four digits (e.g. `0001`, `10000`).
 
 ## Record
 
@@ -56,7 +56,7 @@ Header: `path,parentPath,name,className,depth,properties_json`. The `properties_
 ```json
 {
   "schemaVersion": 1,
-  "exporterVersion": "0.1.0",
+  "exporterVersion": "0.2.0",
   "clientOnly": true,
   "game": {
     "label": "Criminality",
@@ -70,13 +70,13 @@ Header: `path,parentPath,name,className,depth,properties_json`. The `properties_
   "partialReasons": ["workspace_streaming_enabled"],
   "stats": {
     "visited": 1000, "written": 1000, "files": 5, "bytes": 430000,
-    "redactions": 12, "errors": 0, "classCounts": {}
+    "redactions": 12, "errors": 0, "assetReferences": 120, "classCounts": {}
   },
   "services": {
     "ReplicatedStorage": {"visited": 1000, "records": 1000, "files": 5, "passes": 1}
   },
   "errors": [],
-  "settings": {},
+  "settings": {"format": "json", "captureMode": "exhaustive", "chunkSize": 200, "guiPasses": 3},
   "privacy": {},
   "notes": []
 }
@@ -90,4 +90,6 @@ Do not include `placeId`, `gameId`, capture timestamp, volatile object indexes, 
 
 ## Compatibility
 
-A Rust/Python analyzer can read chunks independently, aggregate per service/pass and validate counts against the manifest. Do not merge pass 1 and pass 2 as if they were a single tree; the second pass may contain changed or duplicate GUI nodes.
+A Rust/Python analyzer can read chunks independently, aggregate per service/pass and validate counts against the manifest. Do not merge passes 1, 2, 3, etc. as if they were a single tree: they are separate snapshots. The progress counter is not a fixed total. `stats.files` counts data chunks, not the manifest.
+
+**No completeness cap:** `settings.captureMode = "exhaustive"` means no fixed maximum number of objects, depth, total export bytes or GUI text length; the number of files may be large. Roblox streaming and read restrictions still apply. `stats.assetReferences` counts asset-valued properties included in exported records; it does not indicate downloaded binary asset files.

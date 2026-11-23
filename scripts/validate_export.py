@@ -9,7 +9,7 @@ from pathlib import Path
 import re
 import sys
 
-CHUNK_RE = re.compile(r"^([A-Za-z][A-Za-z0-9]*)-p([12])-([0-9]{4})\.(json|jsonl|csv)$")
+CHUNK_RE = re.compile(r"^([A-Za-z][A-Za-z0-9]*)-p([1-9][0-9]*)-([0-9]{4,})\.(json|jsonl|csv)$")
 REQUIRED_RECORD = {"path", "parentPath", "name", "className", "depth", "properties"}
 STATUSES = {"complete", "partial", "cancelled"}
 

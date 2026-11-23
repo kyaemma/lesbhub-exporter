@@ -89,6 +89,22 @@ class ExportFormatTests(unittest.TestCase):
             errors = validate_folder(folder)
             self.assertTrue(any("Source" in error for error in errors), errors)
 
+    def test_more_than_two_gui_passes(self):
+        with tempfile.TemporaryDirectory() as directory:
+            folder = Path(directory)
+            path = self.write_dataset(folder, "json")
+            new_path = folder / "PlayerGui-p3-0001.json"
+            path.rename(new_path)
+            payload = json.loads(new_path.read_text(encoding="utf-8"))
+            payload["pass"] = 3
+            new_path.write_text(json.dumps(payload), encoding="utf-8")
+            manifest_path = folder / "manifest.json"
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            manifest["stats"]["bytes"] = new_path.stat().st_size
+            manifest["services"]["PlayerGui"]["passes"] = 3
+            manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+            self.assertEqual(validate_folder(folder), [])
+
     def test_missing_manifest(self):
         with tempfile.TemporaryDirectory() as directory:
             errors = validate_folder(Path(directory))
