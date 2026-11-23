@@ -1,7 +1,7 @@
 -- Lesbhub Exporter V1 - client-side, read-only capture engine.
 -- No script source, remote invocation, executor introspection, or network upload.
 local Exporter = {}
-Exporter.VERSION = "0.3.0"
+Exporter.VERSION = "0.4.0"
 Exporter.SCHEMA_VERSION = 1
 Exporter.TARGETS = {
     "ReplicatedStorage", "ReplicatedFirst", "StarterGui", "PlayerGui",
