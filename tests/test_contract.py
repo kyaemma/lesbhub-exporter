@@ -137,7 +137,8 @@ class ExportFormatTests(unittest.TestCase):
 
     def test_no_game_specific_gui_prompts(self):
         ui = (ROOT / "src" / "ui.lua").read_text(encoding="utf-8")
-        for specific_menu in ("STORE", "SKINS", "ToggleStoreUI", "ToggleSkinsUI"):
+        for specific_menu in ("STORE", "SKINS", "ToggleStoreUI", "ToggleSkinsUI",
+                              "Criminality", "CrimModded"):
             self.assertNotIn(specific_menu, ui)
         self.assertIn("continuous", ui)
         self.assertIn("stopRequested", ui)
