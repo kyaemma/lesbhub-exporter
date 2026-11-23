@@ -38,3 +38,8 @@ jobs:
         run: |
           python scripts/build_mock.py /tmp/lesbhub-smoke.luau
           /tmp/luau/luau /tmp/lesbhub-smoke.luau
+      - name: Run mock UI smoke test
+        run: |
+          python scripts/build_mock_ui.py /tmp/lesbhub-ui-smoke.luau
+          /tmp/luau/luau-compile /tmp/lesbhub-ui-smoke.luau > /dev/null
+          /tmp/luau/luau /tmp/lesbhub-ui-smoke.luau
