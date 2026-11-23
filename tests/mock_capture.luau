@@ -25,13 +25,14 @@ local otherCharacter = instance("Alice", "Model", nil, {
 local label = instance("Title", "TextLabel", {
     Text = "Welcome Alice", Visible = true,
 })
+local image = instance("Logo", "ImageLabel", {Image = "rbxassetid://1234567"})
 local box = instance("UserInput", "TextBox", {
     Text = "private typed message", PlaceholderText = "Enter a code",
 })
 local chat = instance("Chat", "ScreenGui", nil, {
     instance("Message", "TextLabel", {Text = "do not capture"}),
 })
-local gui = instance("PlayerGui", "PlayerGui", nil, {label, box, chat})
+local gui = instance("PlayerGui", "PlayerGui", nil, {label, box, chat, image})
 local world = instance("Workspace", "Workspace", {StreamingEnabled = true}, {
     instance("Map", "Folder"), otherCharacter,
 })
@@ -99,6 +100,7 @@ end
 assert(reasonFound, "Streaming limitation was not disclosed")
 
 local seenLabel, seenBox, seenChat, seenCharacter, seenSecret = false, false, false, false, false
+local seenAsset = false
 for path, value in pairs(writes) do
     if path:find("-p1-", 1, true) then
         for _, record in ipairs(value.records or {}) do
@@ -109,6 +111,9 @@ for path, value in pairs(writes) do
                 seenBox = true
                 assert(record.properties.Text == nil, "TextBox input leaked")
                 assert(record.properties.PlaceholderText == "Enter a code")
+            elseif record.name == "Logo" then
+                seenAsset = true
+                assert(record.properties.Image == "rbxassetid://1234567")
             elseif record.name == "Chat" then
                 seenChat = true
             elseif record.name == "Alice" then
@@ -121,6 +126,32 @@ for path, value in pairs(writes) do
         end
     end
 end
-assert(seenLabel and seenBox and seenSecret)
+assert(seenLabel and seenBox and seenSecret and seenAsset)
+assert(m.stats.assetReferences >= 1, "Asset references not counted")
 assert(not seenChat and not seenCharacter, "Chat or other players' character included")
-print("Luau smoke test OK: " .. m.stats.written .. " records, " .. m.stats.files .. " chunks")
+-- Legacy budget keys are ignored. Deep hierarchies and >500 nodes must be
+-- captured even when an older caller includes obsolete caps.
+local chain = instance("RootChain", "Folder")
+local cursor = chain
+for i = 1, 46 do
+    local nextNode = instance("Nested" .. tostring(i), "Folder")
+    cursor._children = {nextNode}
+    cursor = nextNode
+end
+local many = {chain}
+for i = 1, 550 do
+    table.insert(many, instance("Item" .. tostring(i), "Folder"))
+end
+world._children = many
+local extra, extraErr = Exporter.capture({
+    label = "LargeFixture",
+    targets = {Workspace = true},
+    twoPassGui = false,
+    maxNodes = 500, maxDepth = 3, maxBytes = 1024,
+    chunkSize = 25, yieldEvery = 25,
+})
+assert(extra, extraErr)
+assert(extra.manifest.stats.visited >= 598, "A legacy node/depth cap truncated the export")
+assert(extra.manifest.stats.written == extra.manifest.stats.visited)
+assert(extra.manifest.settings.captureMode == "exhaustive")
+print("Luau smoke test OK: uncapped traversal, " .. extra.manifest.stats.visited .. " records")
