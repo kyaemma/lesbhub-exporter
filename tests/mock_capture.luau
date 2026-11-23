@@ -5,9 +5,14 @@ local lastEncoded = nil
 local folders = {}
 
 local function instance(name, className, properties, children)
-    local object = {Name = name, ClassName = className, _children = children or {}}
+    local object = {
+        Name = name, ClassName = className, Archivable = true,
+        _children = children or {},
+    }
     for key, value in pairs(properties or {}) do object[key] = value end
     function object:GetChildren() return self._children end
+    function object:GetAttributes() return self._attributes or {} end
+    function object:GetTags() return self._tags or {} end
     function object:IsA(kind)
         if kind == "GuiObject" then
             return self.ClassName == "Frame" or self.ClassName == "TextLabel"
@@ -32,15 +37,19 @@ local box = instance("UserInput", "TextBox", {
 local chat = instance("Chat", "ScreenGui", nil, {
     instance("Message", "TextLabel", {Text = "do not capture"}),
 })
-local clientCode = instance("MenuController", "LocalScript")
+local clientCode = instance("MenuController", "LocalScript", {Enabled = true})
+local gameStarted = instance("GameStarted", "RemoteEvent")
+gameStarted._attributes = {Tier = "standard", ApiKey = "MUST_NOT_EXPORT"}
+gameStarted._tags = {"Network", "GameEvent"}
 local gui = instance("PlayerGui", "PlayerGui", nil, {label, box, chat, image, clientCode})
 local world = instance("Workspace", "Workspace", {StreamingEnabled = true}, {
     instance("Map", "Folder"), otherCharacter,
 })
 local storage = instance("ReplicatedStorage", "ReplicatedStorage", nil, {
     instance("Events", "Folder", nil, {
-        instance("GameStarted", "RemoteEvent"),
+        gameStarted,
     }),
+    instance("MinimumPrice", "IntConstrainedValue", {Value = 125, MinValue = 5, MaxValue = 200}),
     instance("AssetSound", "Sound", {SoundId = "rbxassetid://7654321"}),
     instance("APIKey", "StringValue", {Value = "short-secret"}),
     instance("BuildLabel", "StringValue", {Value = "modded-crim"}),
@@ -122,6 +131,7 @@ local seenLabel, seenBox, seenChat, seenCharacter, seenSecret = false, false, fa
 local seenAsset = false
 local seenGuiScript = false
 local sawNestedGui = false
+local seenRemoteInfo, seenTypedValue = false, false
 for path, value in pairs(writes) do
     if path:find("-p1-", 1, true) or path:find("/p1-", 1, true) then
         for _, record in ipairs(value.records or {}) do
@@ -136,9 +146,27 @@ for path, value in pairs(writes) do
             elseif record.name == "Logo" then
                 seenAsset = true
                 assert(record.properties.Image == "rbxassetid://1234567")
+            elseif record.name == "GameStarted" then
+                seenRemoteInfo = true
+                local props = record.properties
+                assert(props.Archivable == true)
+                assert(props.RemoteInfo.family == "remote")
+                assert(props.RemoteInfo.boundary == "client_server")
+                assert(props.RemoteInfo.metadataSource == "roblox_class")
+                assert(props.RemoteInfo.observedCalls == false)
+                assert(props.Attributes.Tier == "standard")
+                assert(props.Attributes.ApiKey == nil)
+                assert(#props.Tags == 2)
+            elseif record.name == "MinimumPrice" then
+                seenTypedValue = true
+                assert(record.properties.Value == 125)
+                assert(record.properties.MinValue == 5)
+                assert(record.properties.MaxValue == 200)
             elseif record.name == "MenuController" then
                 seenGuiScript = path:find("/scripts/PlayerGui/p1-", 1, true) ~= nil
                 assert(record.className == "LocalScript" and record.properties.Source == nil)
+                assert(record.properties.Archivable == true)
+                assert(record.properties.Enabled == true)
                 assert(record.path == "PlayerGui/MenuController")
             elseif record.name == "Chat" then
                 seenChat = true
@@ -154,6 +182,7 @@ for path, value in pairs(writes) do
 end
 assert(seenLabel and seenBox and seenSecret and seenAsset)
 assert(seenGuiScript and sawNestedGui, "GUI metadata and GUI scripts not split correctly")
+assert(seenRemoteInfo and seenTypedValue, "Remote metadata or constrained values missing")
 assert(m.stats.assetReferences >= 1, "Asset references not counted")
 assert(not seenChat and not seenCharacter, "Chat or other players' character included")
 local stringOnly, stringOnlyError = Exporter.capture({
