@@ -6,7 +6,7 @@ The UI is built with our [Lesbhub WindUI fork](https://github.com/kyaemma/lesbhu
 
 ## Status
 
-**V0.2.1: full GUI export verified in Potassium; large full-client export still under validation.** On a modded Criminality variant, a GUI-only capture completed with 28,418 records (7,173 asset references, 3.17s). The following full-client run reached 14,000 visited records but aborted on JSON encoding. V0.2.1 adds recursive chunk isolation and a record-level fallback to continue after malformed data; this recovery now passes a dedicated simulated Luau test but still needs a new live retest.
+**V0.3.0: streamlined WindUI and option presets.** The UI and engine are covered by Luau CLI mock tests and GitHub Actions; this UI update still needs a fresh Potassium session test. Earlier builds successfully exported large client snapshots. On a modded Criminality variant, a GUI-only capture completed with 28,418 records (7,173 asset references, 3.17s). The following full-client run reached 14,000 visited records but aborted on JSON encoding. V0.2.1 adds recursive chunk isolation and a record-level fallback to continue after malformed data; this recovery now passes a dedicated simulated Luau test but still needs a new live retest.
 
 ## Run from a supported Roblox client environment
 
@@ -21,15 +21,33 @@ For offline/manual distribution, use `dist/lesbhub-exporter.lua` (but the UI sti
 ## Features
 
 - **Targets:** ReplicatedStorage, ReplicatedFirst, StarterGui, PlayerGui, StarterPlayer, PlayerScripts, StarterPack, Workspace, Lighting, SoundService, Teams.
-- **Presets:** full client **selected by default**, GUI only, structures only; individual target toggles in WindUI.
+- **Targets:** multi-select searchable dropdown, with **all services selected by default**, plus one-click presets for all, GUI-only and game structures.
 - **Properties:** names, classes, parent/child paths, depth, GUI labels/text/buttons, TextBox placeholders, visual styles, asset IDs, selected world properties and basic values.
 - **Formats:** chunked JSON, JSONL or CSV; one **manifest.json** per capture, with settings, counts, status, errors, and partial reasons.
-- **Dynamic GUI:** guided multi-pass capture (3 passes by default); optional immediate **Capture GUI now** button. Open menus yourself so the exporter never simulates clicks, purchases or remote calls.
-- **Live UI:** current service/pass, class, path, visited/discovered/written objects, pending nodes, file writes, elapsed time, asset-reference counter and last events. The progress scale expands automatically, beyond 100k if necessary; no artificial upper bound.
+- **Full export + GUI:** one action for structures and guided GUI snapshots (4 passes by default in Max informations); optional extra **Capture GUI now** for an ad-hoc menu. Open menus yourself; the exporter does not simulate clicks, purchases or remote calls.
+- **Live UI:** indeterminate activity animation while capturing (no fake percentage), exact visited/written stats formatted as K/M, service/pass, current path, files, assets, elapsed time and recent events. Animation stops on completion.
 - **Map tab:** JSON geometry export (Workspace/Lighting/SoundService, BasePart position/CFrame/size, Model world pivot, materials and asset references). Optional separate native `saveinstance()` command like Infinite Yield, only after explicit opt-in and only if the executor supports it.
 - **Fault tolerance:** JSON serialization errors are isolated to the offending records. Recovery keeps traversing and records a `partial` manifest status instead of aborting a whole service.
 - **Performance:** iterative depth-first traversal, periodic `task.wait()`, small chunk files, cancellation and no global depth/object/total-byte/string-length cap.
-- **Privacy:** skips other players' characters, chat GUI, `CoreGui`, script source, and potentially sensitive textbox/strings by default. Redacts known player names and common contact/token patterns on a best-effort basis.
+- **Privacy:** skips other players' characters, chat GUI, `CoreGui` and script source. In v0.3.0 the three option presets **enable** TextBox.Text and StringValue.Value by default for local research; every capture requires acknowledging a private-data warning. Redaction of known player names and common token patterns remains best-effort.
+
+## WindUI interface
+
+The default preset is **Max informations**. All targets are selected. Open **Options → Advanced** only if you need to override a setting; it starts collapsed.
+
+| Preset | Content | GUI snapshots | Traversal |
+|---|---|---|---|
+| **Max informations** | All allowlisted GUI and world properties, GUI text, asset IDs, TextBox.Text and StringValue.Value | 4 | Thorough, frequent yields |
+| **Smart** | Same allowlisted property set, reduced GUI passes and balanced chunking | 3 | Balanced |
+| **Fast** | Still all selected objects, GUI text, asset IDs, TextBox.Text and StringValue.Value, but fewer geometry/layout properties | 2 | Larger chunks, less property work |
+
+All presets require **explicit confirmation before export**, explaining that the locally saved archive may contain private fields and must not be published without review. There is no network upload.
+
+The **Capture** tab shows a moving, indeterminate activity bar and real live counts abbreviated as K/M. It intentionally does **not** claim to know the final percentage before traversal completes. Full export already captures GUI snapshots; **Capture GUI now** is an extra manual capture, not a required second step.
+
+The **Settings** tab contains a configurable show/hide keybind (**RightShift** by default), a Hide button and an **Unload GUI** button. Unload destroys WindUI, disconnects the library's listeners and requests cancellation of any running capture (written chunks are retained). Clicking the window's built-in close-and-destroy action triggers the same cancellation cleanup.
+
+If the exporter is already open, re-running the loader focuses the existing window rather than making duplicates. To load an updated UI version within the same session, use **Settings → Unload GUI** before re-injecting.
 
 ### Output directory
 
@@ -56,8 +74,8 @@ The timestamp and clock suffix are **run identifiers**, not signature material. 
 
 1. Start a Roblox session and launch the exporter. Enter a game label, category and variant.
 2. Select target services and output format. Use GUI-only for targeted interface studies or full client for broad structural comparisons.
-3. For dynamic menus, keep **Guided dynamic-menu snapshots** enabled. After the initial scan, open **STORE** during the next interval and **SKINS** during the one after that. Or open a menu first, then press **Capture GUI now** to take a separate snapshot immediately.
-4. Review the `manifest.json` (especially `status`, `partialReasons` and counts), and validate the directory:
+3. In **Options**, choose **Max informations**, **Smart** or **Fast**. Use **Advanced** only if you want to customize details. **Full export + GUI** includes guided GUI snapshots by default: open **STORE** and **SKINS** when prompted. **Capture GUI now** is optional.
+4. Read and accept the **local-data privacy confirmation** before the capture starts. Then review the `manifest.json` (especially `status`, `partialReasons` and counts), and validate the directory:
    ```powershell
    python scripts/validate_export.py "C:\path\to\LesbhubExporter\criminality\criminality\variant-a\run-folder"
    ```
@@ -86,7 +104,7 @@ To connect an **already existing empty Windows folder** `C:\dev\Lesbhub\lesbhub-
 - Paths may contain unstable per-session indexes; direct PlaceId/GameId and player-dependent details should **not** become detection signatures.
 - `StringValue.Value` and `TextBox.Text` are **off by default** and should remain off for general datasets; enabling either increases the risk of collecting sensitive information.
 - The exporter may miss instances due to permissions, streaming, concurrent object destruction, cancellation or write errors. A `partial` status is informative, not proof of a game difference.
-- Removing dataset caps does not remove physical resource limits: disk space, Roblox replication, intermittent changes and the executor can still constrain a capture. The adaptive progress scale is **not a known final object count** and expands as more descendants are discovered.
+- Removing dataset caps does not remove physical resource limits: disk space, Roblox replication, intermittent changes and the executor can still constrain a capture. The animated progress bar is **activity**, not an estimated percentage; actual counts are shown alongside.
 - **Map files:** The JSON geometry mode does not export Terrain voxel occupancy or binary asset contents. The native `saveinstance()` mode is controlled by the executor, has different privacy guarantees, and may not be implemented by Potassium. It never runs during normal JSON captures.
 - **Encoding recovery:** If one object has a property that cannot be serialized, the exporter attempts to preserve its metadata and unaffected properties. In rare cases it may replace a property with a marker; check `partialReasons` and `errors` before using that capture as a dataset.
 

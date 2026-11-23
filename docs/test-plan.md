@@ -26,6 +26,14 @@ Potassium live results (modded Criminality variant, 2026-11-23): GUI-only captur
 | E19 | Faulty UTF-8 property while scanning | record is recovered, other objects still exported, manifest `partial` explains modification |
 | E20 | Map geometry JSON | CFrame/Position/Size collected from reachable parts; no voxel/binary data claimed |
 | E21 | Native place export supported or unsupported | disabled until explicit operator opt-in; unsupported executors return clear message |
+| E22 | Targets selector all selected by default | multi-select works, no per-target toggle spam |
+| E23 | Presets Max informations / Smart / Fast | all three enable privacy-sensitive values, all include GUI passes by default |
+| E24 | Options → Advanced | collapsed by default, settings remain overrideable |
+| E25 | Full export single action | includes selected PlayerGui/StarterGui and guided GUI passes without second button |
+| E26 | Data privacy confirmation | no scan until user explicitly accepts warning, cancellation leaves no new capture |
+| E27 | Progress and counters | activity bar never claims false completion, counts compact K/M, animation stops at end |
+| E28 | Keybind | RightShift initially, new binding toggles once and ignores input while editing |
+| E29 | Unload GUI | destroys UI, clears handle/listeners and requests capture cancellation |
 
 For each run record: executor version, client FPS before/during/after, duration, number of visited/written objects, number of files, manifest status, and validation output. Avoid including player names in test logs.
 
