@@ -1,5 +1,7 @@
 -- Optional Lesbhub Remote Observer plugin for Cobalt by upio.
--- Install separately in Cobalt/Plugins/. Never auto-loaded by Lesbhub Exporter.
+-- Install separately in Cobalt/Plugins/. This original adapter uses the documented
+-- plugin API and contains no Cobalt implementation. Cobalt is Apache-2.0,
+-- copyright 2025 upio & devid; see its upstream LICENSE.md.
 -- Passive metadata only: no raw arguments, remote replay/blocking, or uploads.
 Cobalt.PluginData = {
     Name = "Lesbhub Remote Observer",
@@ -28,7 +30,6 @@ local nextSequence = 0
 local records = {}
 local ids = setmetatable({}, {__mode = "k"})
 local ignored = 0
-local lastResult = "Not started"
 
 local function safePath(instance)
     local names, seen = {}, {}
@@ -65,7 +66,7 @@ local function topLevelTypes(args)
     local count = tonumber(args.n) or #args
     count = math.max(0, math.floor(count))
     local types = {}
-    -- This is a schema hint only; never read argument values or nested fields.
+    -- Only inspect top-level types; never retain values or inspect nested fields.
     local limit = math.min(count, 32)
     for i = 1, limit do
         local ok, kind = pcall(typeof, args[i])
@@ -239,12 +240,6 @@ local function start()
     local ok, cleanup = pcall(function()
         return Cobalt.Spy:InterceptExecutedCalls("All", function(info, instance, direction)
             pcall(observe, info, instance, direction)
-            -- Optional v0.7 capture bridge: exact Instance refs and documented
-            -- info.Origin, never a name-based guess or a replayed call.
-            local env = (type(getgenv) == "function" and getgenv()) or _G
-            if type(env.LesbhubExporterObserveRemote) == "function" then
-                pcall(env.LesbhubExporterObserveRemote, info, instance, direction)
-            end
             -- No return value. Let Cobalt and the game behave normally.
         end)
     end)
@@ -256,9 +251,45 @@ local function start()
     return true, "recording"
 end
 
+-- A bridge owned by this plugin, not an upstream Cobalt global API. Each
+-- subscription owns its interceptor; the standalone summary remains independent.
+local env = (type(getgenv) == "function" and getgenv()) or _G
+local adapterAlive = true
+local subscriptions = {}
+local adapter = {version = 1}
+function adapter.subscribe(callback, onUnavailable)
+    assert(adapterAlive, "Cobalt adapter unloaded")
+    assert(type(callback) == "function", "callback required")
+    assert(type(Cobalt.Spy) == "table" and type(Cobalt.Spy.InterceptExecutedCalls) == "function", "Cobalt spy API unavailable")
+    local active = true
+    local function handler(info, instance, direction)
+        if not active then return end
+        local types, count = topLevelTypes(type(info) == "table" and info.Arguments or nil)
+        local invokeKind = type(info) == "table" and info.InvokeKind or nil
+        if invokeKind ~= "Request" and invokeKind ~= "Callback" then invokeKind = nil end
+        local origin = type(info) == "table" and info.Origin or nil
+        if typeof(origin) ~= "Instance" then origin = nil end
+        pcall(callback, {argumentTypes = types, argumentCount = count, invokeKind = invokeKind}, instance, direction, origin)
+        -- Returning nothing preserves Cobalt's logging behavior.
+    end
+    local unsubscribe = Cobalt.Spy:InterceptExecutedCalls("All", handler)
+    assert(type(unsubscribe) == "function", "Cobalt subscription failed")
+    local function cleanup()
+        if not active then return end
+        active = false
+        subscriptions[cleanup] = nil
+        pcall(unsubscribe)
+        -- Keep handler strongly reachable until cleanup, including weak registries.
+        handler = nil
+    end
+    subscriptions[cleanup] = onUnavailable or false
+    return cleanup
+end
+env.LesbhubCobaltAdapter = adapter
+
 local controls = Cobalt.UI:CreatePluginSettings()
 controls:AddLabel("Passive remote metadata (no argument values)", 15)
-controls:AddLabel("This plugin is OFF until Start is clicked.", 13)
+controls:AddLabel("Standalone summary is off until Start; exports subscribe automatically.", 13)
 controls:CreateButton("Start observing", function()
     local ok, message = start()
     if ok then Cobalt.Sonner.success("Remote metadata recording started")
@@ -270,6 +301,14 @@ controls:CreateButton("Stop and save summary", function()
     else Cobalt.Sonner.error(message) end
 end)
 Cobalt:BindToUnload(function()
+    adapterAlive = false
+    if env.LesbhubCobaltAdapter == adapter then env.LesbhubCobaltAdapter = nil end
+    local pending = {}
+    for cleanup, notify in pairs(subscriptions) do pending[#pending + 1] = {cleanup, notify} end
+    for _, item in ipairs(pending) do
+        item[1]()
+        if type(item[2]) == "function" then pcall(item[2], "cobalt_unloaded") end
+    end
     if running then
         local ok, message = stopAndSave()
         if not ok then warn("[Lesbhub Cobalt] Unable to save: " .. tostring(message)) end

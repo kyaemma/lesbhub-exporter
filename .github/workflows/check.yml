@@ -32,7 +32,14 @@ jobs:
         run: |
           /tmp/luau/luau-compile src/engine.lua > /dev/null
           /tmp/luau/luau-compile src/deep_scripts.lua > /dev/null
+          /tmp/luau/luau-compile src/client_metadata.lua > /dev/null
+          /tmp/luau/luau-compile src/gui_states.lua > /dev/null
+          /tmp/luau/luau-compile src/relations.lua > /dev/null
+          /tmp/luau/luau-compile src/report.lua > /dev/null
+          /tmp/luau/luau-compile src/runtime_observer.lua > /dev/null
+          /tmp/luau/luau-compile src/source_analysis.lua > /dev/null
           /tmp/luau/luau-compile src/ui.lua > /dev/null
+          /tmp/luau/luau-compile src/work_budget.lua > /dev/null
           /tmp/luau/luau-compile dist/lesbhub-exporter.lua > /dev/null
           /tmp/luau/luau-compile tests/mock_capture.luau > /dev/null
       - name: Compile public WindUI fork bundle
@@ -65,3 +72,18 @@ jobs:
           /tmp/luau/luau-compile tests/mock_cobalt.luau > /dev/null
           python scripts/build_mock_cobalt.py /tmp/lesbhub-cobalt-smoke.luau
           /tmp/luau/luau /tmp/lesbhub-cobalt-smoke.luau
+      - name: Run v0.8 inspection module mocks
+        run: |
+          python scripts/build_mock_budget.py /tmp/lesbhub-budget-smoke.luau
+          python scripts/build_mock_analysis.py /tmp/lesbhub-analysis-smoke.luau
+          python scripts/build_mock_gui_states.py /tmp/lesbhub-gui-states-smoke.luau
+          python scripts/build_mock_runtime.py /tmp/lesbhub-runtime-smoke.luau
+          python scripts/build_mock_relations.py /tmp/lesbhub-relations-smoke.luau
+          python scripts/build_mock_report.py /tmp/lesbhub-report-smoke.luau
+          python scripts/build_mock_resume.py /tmp/lesbhub-resume-smoke.luau
+          python scripts/build_mock_search.py /tmp/lesbhub-search-smoke.luau
+          python scripts/build_mock_capture_cancel.py /tmp/lesbhub-capture-cancel-smoke.luau
+          for mock in /tmp/lesbhub-{budget,analysis,gui-states,runtime,relations,report,resume,search,capture-cancel}-smoke.luau; do
+            /tmp/luau/luau-compile "$mock" > /dev/null
+            /tmp/luau/luau "$mock"
+          done

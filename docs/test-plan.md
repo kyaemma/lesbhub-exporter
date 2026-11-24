@@ -1,6 +1,6 @@
 # Exporter acceptance plan and historical live results
 
-For completed v0.7 code extraction and controlled continuous tests, see [Deep Export validation](deep-export-validation.md). The notes below include historical results; they are not a claim that every scenario has been retested live.
+For completed v0.7 code extraction, the v0.8 full-client trial and controlled fixtures, see [Deep Export validation](deep-export-validation.md). The notes below include historical results; they are not a claim that every scenario has been retested live.
 
 Potassium live results (modded Criminality variant, 2026-11-23): GUI-only capture completed with 28,418 objects and 7,173 asset references in 3.17 seconds. The next full-client export was partial at 14,000 visited, 13,800 written, with `json_encode_failed:ReplicatedStorage`. V0.2.1 added encoding recovery. Later screenshots show 223.7K records, 44.7K asset references and a 60.3-second run (partial status; cause needs manifest review). The original v0.5 continuous mode had not been live-validated at that time; v0.7 now has a controlled local live fixture. The following scenarios are the acceptance suite.
 
@@ -13,7 +13,7 @@ Potassium live results (modded Criminality variant, 2026-11-23): GUI-only captur
 | E05 | Client dataset larger than 15,000 nodes and/or deeper than 28 levels | no global limit truncation; all reachable nodes enumerated until manual cancellation or actual runtime failure |
 | E06 | Missing `writefile` / `makefolder` | clear error, no silent upload / fallback exfiltration |
 | E07 | TextBox containing a typed personal message | Headless engine default omits it; UI presets include it only after privacy acknowledgment |
-| E08 | Player names and characters | other characters omitted; known player aliases masked |
+| E08 | Player names and characters | known names redacted best-effort; character filtering checked against current Player/Character identity and lifecycle, not treated as anonymization |
 | E09 | JSON / JSONL / CSV output | each passes `validate_export.py` |
 | E10 | StarterGui/PlayerGui not yet present | no crash; missing root reported |
 | E11 | Repeat capture without `isfolder` API | folder behavior verified on target executor |
@@ -65,7 +65,7 @@ For each run record: executor version, client FPS before/during/after, duration,
 | E53 | Script metadata | `Archivable` and supported `Enabled`/RunContext flags, no Source |
 | E54 | Constrained/typed values | `IntConstrainedValue` includes numeric Value/MinValue/MaxValue where readable |
 | E55 | Attributes and tags | client-visible GetAttributes/GetTags values collected, sensitive keys filtered |
-| E56 | Optional Cobalt plugin | OFF by default, explicit start/stop, only coarse type signatures and counts |
+| E56 | Optional Cobalt integration | Separately installed plugin publishes an adapter; exporter subscribes automatically during capture when enabled and present; standalone summary still requires explicit start |
 | E57 | Cobalt integration unload | interceptor cleanup occurs; no replay, blocking, raw arguments or uploads |
 
 
@@ -79,3 +79,27 @@ For each run record: executor version, client FPS before/during/after, duration,
 | E65 | Public repository hygiene | no private game source, capture files, payloads or user identities committed |
 
 | E62 | Metadata-only choice | Advanced toggle disables Luau extraction explicitly without disabling GUI/structural export |
+
+## v0.8 inspection acceptance cases
+
+| ID | Scenario | Expected result |
+|---|---|---|
+| E66 | Client metadata | Public place/executor capability metadata is explicit; player/session/private-server identifiers are omitted |
+| E67 | Cooperative work budget | Configured slice/yield metrics and native-call overruns are reported; blocking native work is not claimed to be preemptible |
+| E68 | GUI state graph | Repeated states are represented once, observed transitions retain order, activations are passive, unvisited menus remain unknown |
+| E69 | Runtime observer availability | Adapter unavailable, disabled, attached with no calls, normal stop and interrupted unload are distinct; payload values are absent |
+| E70 | Conservative source analysis | Synthetic static imports/remotes/GUI paths carry line/byte evidence; dynamic/name-only/ambiguous references stay unresolved and code is never executed |
+| E71 | Relationship identity | Exact `InstanceRef` IDs and parent links are distinct from static candidates and Cobalt observations; edges never claim causality |
+| E72 | Duplicate sibling paths | `~2` aliases and duplicate complete paths remain ambiguous even when stored filenames differ |
+| E73 | Layered report v2 | Human and machine reports derive from one object; all eight layers carry status, reason, counts, artifacts and evidence |
+| E74 | Artifact ledger | Every indexed artifact has a relative safe path, byte count and supported checksum; mutation/missing/unindexed files fail validation |
+| E75 | Backward validator compatibility | Existing v0.5-v0.7 fixtures remain accepted; v0.8-only requirements apply only when the inspection version is present |
+| E76 | Search navigation | Literal index and reconstructed-source search use explicit pages; search never reads source from Roblox or emits source into logs |
+| E77 | Public report hygiene | Live notes contain aggregate metrics only; no third-party source, game strings, player identity, private server metadata or captured payloads |
+| E78 | Respawn privacy scope | PlayerAdded, CharacterAdded, aliases and GetPlayerFromCharacter are tracked when each record is observed; respawned other-player characters remain excluded and the own-character policy is explicit |
+
+The v0.8 contract mocks are synthetic and run in CI with the official Luau CLI.
+They cover budget checkpoints, candidate analysis, GUI state reduction, observer
+availability, identity/path relation resolution, report status and artifact
+validation. Live evidence does not replace these controlled cases or imply that
+unvisited menus and server-only behavior were captured.

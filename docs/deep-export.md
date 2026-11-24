@@ -1,4 +1,8 @@
-# Deep Export v0.7 contract and migration
+# Deep Export contract and migration (v0.5–v0.8)
+
+This document retains the v0.7 script extraction and continuous-capture contract.
+For v0.8 inspection modules, report layers and artifact validation, see the
+[v0.8 architecture](deep-export-v08.md).
 
 The runtime exporter is autonomous. Potassium MCP was used to develop and test it,
 not to perform the product's discovery, reconstruction or file writes.
@@ -84,8 +88,10 @@ reconnection. It does not recapture metadata or assume a matching name is identi
 All paths remain under `LesbhubExporter/`; unsafe roots and script IDs are rejected.
 
 The Capture tab searches the script, remote and GUI indexes by literal name/path
-and displays up to 50 matches in the activity journal. It also copies the local
-report. The report and index list output paths and every failed/partial extraction.
+and displays up to 50 matches in the activity journal. V0.8 adds an explicit
+source-code mode over reconstructed `.luau` files and paged results. It also copies
+the local report. The report and index list output paths and every failed/partial
+extraction.
 
 ## Continuous identity and optional diagnostics
 
@@ -106,13 +112,16 @@ snapshots remain separate observations, not deduplicated objects.
 discovered buttons; the product never clicks buttons or initiates purchases.
 Operator activation logs and latest GUI states are separate from structural chunks.
 
-**Accept optional Cobalt observations** enables a local bridge for the separately
-started observer plugin. It records direction, global sequence, timestamp, argument
-count and top-level types. Raw values, nested payloads and secrets are not recorded.
-`info.Origin` must be an actual known Instance before an observed caller link is
-added; strings, matching names and source-text guesses do not create causal links.
-Without Cobalt, inventory remains useful and no activity is invented. See
-[Cobalt setup](cobalt-integration.md).
+**Accept optional Cobalt observations** enables a local bridge to the separately
+installed adapter plugin. When the adapter is present, the exporter subscribes
+automatically for the duration of capture; it does not start Cobalt itself. The
+standalone Cobalt summary still requires an explicit plugin action. The bridge
+records direction, global sequence, timestamp, argument count and top-level types.
+Raw values, nested payloads and secrets are not recorded. `info.Origin` contributes
+only a capture-local `callerInstanceId` when it resolves to a known Instance;
+strings, matching names and source-text guesses do not establish causal links.
+Without an adapter, inventory remains useful and the observation layer is marked
+unavailable. See [Cobalt setup](cobalt-integration.md).
 
 All listeners and the bridge are cleaned on stop, cancel and capture exceptions.
 Very short objects before subscription, client suspension, missing replication and
@@ -120,7 +129,31 @@ executor failures remain physical limits. Raw payload export is deliberately not
 provided; more detailed test diagnostics currently mean caller identities and
 ordered type signatures.
 
-## Compatibility with v0.5/v0.6
+## Deep Export v0.8 inspection additions
+
+V0.8 leaves the existing metadata chunks and reconstructed-source format intact.
+It adds client metadata, a report v2, an artifact checksum index, GUI state and
+transition sidecars, runtime observer availability, conservative source analysis
+and an evidence-labelled relation index. Each report layer independently records
+status, reason, counts, artifact paths and evidence. An adapter that is unavailable
+is reported differently from an attached adapter that observed no calls.
+
+Static code references resolve only when a complete candidate path has one match
+in the client-visible catalog and the target class is appropriate. A name match,
+an ambiguous path (including duplicate sibling aliases), a dynamic expression or
+an unknown target remains unresolved. Direct `InstanceRef` properties retain the
+exact capture-local target ID; targets outside the small relationship catalog are
+resolved only if that ID exists in the capture's metadata identity map. Parent
+links are structural. Cobalt observations and close-in-time GUI/remote activity are
+evidence of observed association only; they never establish handler behavior or
+causality. Static reconstruction is text analysis and is never executed.
+
+GUI states represent only the client states captured during the observation window
+and operator-guided passes. Hidden, unloaded or unvisited menus remain unknown.
+The default short runtime observation window and cooperative frame budget help
+bound exporter work but cannot preempt native/executor calls.
+
+## Compatibility with v0.5–v0.7
 
 - Metadata `schemaVersion: 1` and categorized layout v2 / flat layout v1 remain.
 - New fields are additive. Never interpret v0.5/v0.6 paths as stable IDs.

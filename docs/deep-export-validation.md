@@ -1,4 +1,4 @@
-# Deep Export v0.7 validation — 2026-11-24
+# Deep Export validation — 2026-11-24
 
 This report contains metrics and original test code descriptions only. No third-party
 game source, player identity, private server identifier or captured payload is published.
@@ -111,10 +111,11 @@ anything or invoke a server remote.
   counts were both two (pre-existing listeners), and the bridge was removed.
 - The resulting dataset passed the Python validator.
 
-The candidate WindUI dashboard also loaded in Potassium and reported engine v0.7.0.
-Automated UI tests exercise language, persistence, controls, privacy consent,
-Stop & Save and unload/reload. Live visual polish across all display sizes and real
-Cobalt traffic observation still require separate validation.
+The candidate v0.7 WindUI dashboard also loaded in Potassium and reported engine
+v0.7.0. Automated UI tests exercise language, persistence, controls, privacy
+consent, Stop & Save and unload/reload. At that validation point, real Cobalt
+traffic was still unverified; the v0.8 trials below provide live incoming/outgoing
+observations. Live visual polish across all display sizes remains unverified.
 
 ## Automated checks
 
@@ -126,5 +127,269 @@ disk/readback failures, cancellation and unsafe paths. The engine mock also cove
 short events during the baseline, homonyms, replacements, rename identity and cleanup.
 
 Only synthetic code is committed in fixtures. Native executor blocking behavior,
-decompiler semantic correctness, every game variant and real incoming/outgoing
-Cobalt traffic have not been universally validated.
+decompiler semantic correctness, every game variant and complete Cobalt coverage
+have not been universally validated. Real Cobalt traffic was sampled in the v0.8
+trials below, but those counts do not prove complete coverage.
+
+## First v0.8 full-client trial
+
+The v0.8 trial recorded aggregate counts only; no game source, place name, player
+identity, server identifier, source payload or Cobalt argument value is included in
+this repository. The capture itself remains in the local executor workspace.
+
+| Metric | Observed |
+|---|---:|
+| Script objects discovered | 1,138 |
+| Reconstructed `.luau` files saved | 811 |
+| Empty decompiler results | 327 |
+| Failed results | 0 |
+| Distinct observed GUI states | 46 |
+| GUI transitions | 45 |
+| Cobalt-observed calls | 3,726 |
+| Capture duration | 105.76 seconds |
+| FPS before / during capture | 152 / 61.5 |
+
+The capture passed integrity validation, and all 811 saved files compiled with
+the official Luau compiler. Against the available baseline files, all 667 were
+present; 662 reconstructed bodies were strictly byte-identical. Five bodies
+differed while retaining the same byte count, consistent with decompiler output
+variation. Therefore, not all file/source hashes matched across runs.
+
+The call count represents observations received by the adapter, not unique
+network requests. The observer records direction and top-level argument types;
+raw values are excluded. GUI states only cover the states reached and observed
+during this capture. Other menus and lazy interfaces remain unknown.
+
+The reference comparison for `main@0b61c6f` was 667 saved files from 941 script
+objects in 38.08 seconds. These two measurements are **not a controlled or direct
+performance comparison**: the v0.8 trial ran in a different environment with
+Cobalt and other UI activity enabled, and recorded FPS fell from 152 to 61.5.
+The older v0.7 runs already described above also had different counts and timings;
+do not merge their denominators or durations. The FPS drop is material and needs
+controlled follow-up before drawing conclusions about the 6 ms cooperative work
+budget.
+
+A separate v0.7 trial with Cobalt present saved 668 files from 1,014 script
+objects in 44.37 seconds. This is a closer environment comparison for observer
+overhead, but still has different discovered objects and does not establish a
+controlled performance delta. See the final candidate section below for the
+latest validated v0.8 result.
+
+An earlier comparison tool exposed 104 source files, with some files appearing
+truncated. The current decompiler writer applies no artificial source-text cap and
+checks that saved bytes match the bytes it returned. That comparison does not
+prove the reconstructed output is complete, semantically equivalent, or the
+original Roblox source.
+
+## Earlier optimized v0.8 capture
+
+This completed capture preceded the final candidate below and is retained as
+historical evidence. It is not the latest validated result.
+
+A later run, after the engine's folder cache and event batching changes, completed
+integrity validation and compiled every saved script with the official Luau
+compiler:
+
+| Metric | Observed |
+|---|---:|
+| Script objects discovered | 1,010 |
+| Reconstructed `.luau` files saved / compiled | 719 / 719 |
+| Empty / failed results | 291 / 0 |
+| Metadata records | 150,079 |
+| Metadata bytes | 97,156,262 |
+| Metadata chunks | 852 |
+| Delta records | 16,921 |
+| Distinct observed GUI states / transitions | 20 / 20 |
+| Discovered GUI buttons / activations | 748 / 0 |
+| Cobalt observations | 1,850 incoming / 0 outgoing |
+| Capture duration | 68.87 seconds |
+| FPS before / during capture | 186.7 / 81.1 |
+| Frame p95 / p99 / maximum | 0.023023 / 0.041523 / 0.22264 seconds |
+| Lua heap before / after | 443,510 / 532,784 KiB |
+
+No existing live button was activated by the exporter. The local synthetic GUI
+fixture exercised five unique observed states, including creation and removal;
+its test handlers are synchronous and do not model replication or server latency.
+The number of observed states depends on which UI was open during the capture;
+the remaining menus are unknown. The 1,850/0 counts are calls received by the
+Cobalt adapter, not unique network requests or proof that no outgoing call
+occurred. Callers are represented by `callerInstanceId` when a known Origin
+Instance is available, never by serializing a caller object.
+
+All 668 files from the Cobalt-present v0.7 comparison capture were present in this
+v0.8 output. Its v0.7 run recorded 134,709 metadata records, about 84 MB, 512
+chunks, 44.37 seconds and FPS 183.45 before / 107.40 during capture. The newer
+v0.8 run recorded more visible records, bytes and chunks. Although Cobalt was
+present in both, changed client contents and other runtime activity prevent
+treating this as a controlled performance comparison.
+
+Artifact profiling counted 4,314 write calls and 29.037 seconds in the earlier
+trial, compared with 880 calls and 5.749 seconds in the optimized run. Capture
+enrichment and the dynamic client contents changed between those runs; this is
+not a controlled percentage improvement. The local helper
+[`benchmark_client.luau`](../scripts/benchmark_client.luau) records aggregate FPS,
+frame intervals, elapsed time and pre/post Lua heap readings for future same-client
+comparisons. Heap snapshots do not prove a retained-memory limit or leak.
+
+The optimized run took 68.87 seconds, with FPS averaging 186.7 before and 81.1
+during the capture. The frame maximum was 0.22264 seconds, which is material.
+The work budget is cooperative and cannot preempt native calls; the heap increased
+by the reported snapshot. These observations warrant further controlled profiling,
+not a claim of a performance ceiling or bounded retained memory.
+
+## Final candidate live validation
+
+The final candidate was captured after the character-tracking, caller-resolution
+and temporal-relation changes. The local export passed `validate_export.py`, and
+all 714 saved source files compiled with the official Luau CLI.
+
+| Metric | Observed |
+|---|---:|
+| Script objects discovered | 1,015 |
+| Reconstructed sources saved | 714 (625 ModuleScripts, 89 LocalScripts) |
+| Empty / failed / partial / inaccessible / pending | 301 / 0 / 0 / 0 / 0 |
+| Source bytes / files including headers | 3,997,840 / 4,140,774 |
+| Largest reconstructed script | 7,534 lines |
+| Metadata records / unique instances | 149,347 / 142,407 |
+| Metadata bytes / chunks / deltas | 96,767,208 / 862 / 15,337 |
+| Artifact ledger files / bytes | 1,902 / 147,398,476 |
+| GUI states / transitions | 13 / 12 |
+| Discovered remote/bindable inventory entries | 1,187 (includes removed flags) |
+| Cobalt-observed calls | 2,172 incoming / 0 outgoing |
+| Observation rows with scriptId / callerInstanceId | 1,780 / 2,159 |
+| Caller/relation overflow drops | 0 / 0 |
+| Relations resolved / unresolved / ambiguous | 24,766 / 1,572 / 2 |
+| Temporal associations | 132, all `causal=false` |
+| Capture duration | 74.08694 seconds |
+| FPS before / during capture | 124.1743 / 74.8882 |
+| Frame p95 / p99 / maximum | 0.02408575 / 0.04265136 / 0.20780085 seconds |
+| Lua heap before / after | 459,974 / 581,937 KiB |
+
+All 668 files from the Cobalt-present v0.7 comparison capture were present in
+the new output by path and class. Of those, 663 reconstructed bodies were strictly
+byte-identical and five varied. This is a cross-capture file comparison, not
+evidence that the same Instance was present; debug ID and class agreement alone
+do not establish identity across changing clients.
+
+The 747 discovered GUI buttons included one `Activated` record from the synthetic
+local fixture only. The fixture produced five distinct states across its own
+creation/removal scenario. A UI automation attempt also clicked the fixture, but
+the observed count discrepancy means this is not evidence that a human activated
+a live game button. Do not claim operator interaction based on that event.
+
+Listeners remained balanced across capture: global `PlayerAdded` was 16 before
+and after, `PlayerGui.DescendantAdded` was 5/5 and local-character `CharacterAdded`
+was 33/33. The capture reported character tracking enabled and checked the actual
+player/character APIs. Join and respawn simulation is separate; these checks do
+not prove that every live player character or respawn is excluded, and do not
+constitute an anonymization guarantee. Keep exports private and review before reuse.
+
+This candidate was read back byte-for-byte from the local output file. A prior
+MCP stdout rendering lost some Unicode glyphs in displayed text; local file bytes
+were verified and the display artifact was not a bundle modification.
+
+### Same-session resume and source search
+
+The final candidate was resumed in the same executor session. All 714 verified
+source files were skipped without decompilation or modification. Of the initial
+301 empty entries, 270 remained empty and 31 became inaccessible because their
+original client instances had disappeared; failed, partial and pending counters
+remained zero. Observation logs remained frozen during resume and a two-second
+post-stop check. The report marked relations partial with an explicit stale-source
+reason rather than leaving prior links as current. The resumed dataset passed
+`validate_export.py`.
+
+An exact `require` source search returned 455 matches; its paginated page returned
+three entries with valid source-line locations. Search was literal and limited to
+reconstructed local files.
+
+### Historical long UI workflow run — not a quality or privacy benchmark
+
+An earlier full **Max** export was started through the real UI, accepted its
+confirmation and continued through four guided passes to the result screen. This
+proves the unified UI-to-report workflow reached completion; its dataset is not
+privacy validated and is not a safe-to-share example. The run exposed respawned
+character source trees outside the then-current exclusion tracking. No captured
+source or player data from it is in this repository.
+
+Its historical counters were 1,448 script objects, 1,009 successful sources,
+439 empty results, 0 failures, 123 GUI states, 124 transitions and 754 discovered
+buttons. The one `Activated` count came only from the synthetic local fixture;
+it is not proof of a human action on a live game UI. It recorded 9,245 Cobalt
+observations, but direction was not verified. Capture time was 240.168 seconds;
+FPS averaged 93.274 before / 73.132 during capture. The run used a busier client,
+four Max passes and `yieldEvery=45`; its totals and performance are historical,
+not completeness, privacy, quality or controlled performance claims.
+
+## v0.8 automated contract checks
+
+The v0.8 synthetic checks cover client metadata, cooperative work slices,
+candidate-only source analysis, observed GUI states and transitions, runtime
+adapter availability, exact-path/InstanceRef relationships, report v2 layers,
+artifact checksums, cancellation, resume/search and backward validation fixtures.
+CI compiles the modules and generated bundle, then runs capture, writer, UI,
+Cobalt, budget, analysis, GUI, runtime, relation, report, resume, search and
+cancellation mocks with the official Luau CLI. These tests do not
+establish behavior for every game, executor, Cobalt configuration or unvisited UI.
+
+
+## Final publication gate - full UI bundle, 2026-11-24
+
+The exact final PR #3 bundle was loaded byte-for-byte into the existing Roblox
+client, then started through the actual **Full export + GUI** button and its
+confirmation. No capture settings or data limits were overridden by the test.
+The Max preset retained all targets, reconstructed sources, GUI properties,
+attributes/tags, four guided GUI passes with seven-second waits, and the
+six-second passive runtime window. Capture took **205.6645 seconds** (3 min 26 s).
+Exhaustiveness and integrity take precedence over speed for this release.
+
+Tested bundle: 268,948 bytes, SHA-256
+`25f280c2d16bf4832e44d0c5efa637294f23e70605a038d2b9c849c826f5e543`.
+The client remained on the same place/universe/version as the earlier tests;
+live contents had changed during the intervening session, so counts are not a
+controlled comparison with the earlier 714-file candidate.
+
+| Publication check | Result |
+|---|---|
+| Script objects / attempts | 974 / 974 |
+| Verified reconstructed files | 691: 603 ModuleScripts and 88 LocalScripts |
+| Empty / failed / partial / inaccessible / pending | 283 / 0 / 0 / 0 / 0 |
+| Official CLI source compilation | 691/691 passed |
+| Metadata / unique Instance IDs | 159,484 records / 148,745 IDs |
+| Metadata chunks / bytes | 1,360 / 102,150,968 |
+| Observed remote/bindable inventory | 1,193, including explicit removal state |
+| Genuine Cobalt observations | 2,447 incoming, zero outgoing in this interval |
+| GUI states / transitions | 19 / 18 |
+| Temporal associations | 59, explicitly noncausal |
+| Artifact ledger | 2,365 files, 172,558,565 bytes |
+| Independent dataset validator | Passed |
+
+The extra acceptance audit cross-checked script, GUI, remote and asset IDs against
+metadata; current index sequences and remote removal flags; observation totals
+against per-remote counts; temporal edge references against real GUI/remote log
+sequences; report counts against the manifest; and the eight report layers in the
+readable report. Every successful reconstructed file was compiled with the
+separate official Luau CLI. The dataset validator re-read all ledger artifacts
+and verified their sizes/checksums, source checksums, global sequences, GUI state
+files and report consistency.
+
+Test instrumentation observed one actual Cobalt adapter subscription and one
+cleanup, with zero active subscriptions after completion. Counts returned to
+their initial values on all 26 watched signals, covering selected roots'
+DescendantAdded/DescendantRemoving, PlayerAdded, the local CharacterAdded and the
+controlled fixture buttons. Observation logs and the script index remained
+unchanged in a three-second post-stop check. The fixture was then absent. Its
+own handlers exercised local GUI states; the one activation was a synthetic
+signal on our own button, not a human game action or a causal network proof.
+The measurement wrappers did not alter capture options or saved data and are
+not runtime dependencies.
+
+The manifest truthfully remains **partial**: 283 decompiler outputs were empty,
+and 21 metadata encoding/property recoveries were reported. No source was counted
+as successful without verified bytes and compilation. These are documented
+client/decompiler and serialization limits, not an integrity-check failure.
+No third-party sources or private capture files from this gate are published.
+
+Local release checks also passed: deterministic bundle, 29 Python tests,
+13 Luau mock suites, source/bundle/plugin compilation, and git diff --check.
+The exact same bundle bytes are required for the main distribution verification.

@@ -1,7 +1,7 @@
 -- Synthetic code only. No third-party game sources belong in this repository.
 local disk, dirs, payloads = {}, {}, {}
 local encodes, decompiles, appends = 0, 0, 0
-local failWrite, corruptRead, onWait = false, false, nil
+local failWrite, failIndex, corruptRead, onWait = false, false, false, nil
 local http = {}
 function http:JSONEncode(value)
     encodes = encodes + 1
@@ -15,6 +15,7 @@ function isfolder(path) return dirs[path] == true end
 function isfile(path) return disk[path] ~= nil end
 function writefile(path, value)
     if failWrite and path:match("%.luau$") then error("simulated disk failure") end
+    if failIndex and path:match("scripts/index%.json$") then error("simulated index failure") end
     assert(not path:find("..", 1, true), "write escaped output root")
     disk[path] = value
 end
@@ -65,11 +66,17 @@ assert(decompiles == attempts and good:summary().stats.skipped == 3, "resume re-
 local errors = capture({"ERROR", "", "-- comment only", "BROKEN", "-- Lines 1-2000 of 7000\nreturn 1"})
 assert(errors.entries[1].status == "failed")
 assert(errors.entries[2].status == "empty" and errors.entries[3].status == "empty")
+assert(errors.entries[2].diagnosticByteLength == 0 and not errors.entries[2].diagnosticPath)
+assert(errors.entries[3].diagnosticByteLength == #"-- comment only")
 assert(errors.entries[4].status == "partial" and errors.entries[4].verifiedReadback)
 assert(errors.entries[5].status == "partial" and errors.entries[5].truncationDetected)
 local commentOnly = capture({"--[[decompilation unavailable\nno code\n]]", "--[=[only a comment]=]"})
 assert(commentOnly.entries[1].status == "empty" and commentOnly.entries[2].status == "empty",
     "comment-only failure was saved as successful code")
+local diagnostic = commentOnly.entries[1]
+assert(diagnostic.diagnosticPath and diagnostic.diagnosticChecksumAlgorithm == "adler32")
+assert(readfile("LesbhubExporter/mock/run3/" .. diagnostic.diagnosticPath)
+    == "--[[decompilation unavailable\nno code\n]]", "diagnostic bytes changed")
 local originalDecompile = decompile
 decompile = nil
 local unsupported = capture({"return 1"})
@@ -89,8 +96,41 @@ local control = {}
 local beforeAppends = appends
 onWait = function() if appends > beforeAppends then control.cancelled = true end end
 local interrupted = capture({long}, control)
-assert(interrupted.entries[1].status == "failed" and not interrupted.entries[1].verifiedReadback)
+assert(interrupted.entries[1].status == "inaccessible" and not interrupted.entries[1].verifiedReadback)
 onWait = nil
+local beforeEmpty = encodes
+good:drain()
+assert(encodes == beforeEmpty, "empty drain rewrote the index")
+crypt = {hash = function() return string.rep("a", 64) end}
+local previousAttempts = decompiles
+good:resume(good.entries, function(e) return objects[e.instanceId] end)
+assert(decompiles == previousAttempts, "resume must use each stored checksum algorithm")
+crypt = nil
+local batchControl = {}
+local batchAttempts = decompiles
+onWait = function() batchControl.cancelled = true end
+local batch = capture({"return 1", "return 2", "return 3"}, batchControl)
+onWait = nil
+assert(decompiles == batchAttempts + 1 and batch.entries[2].status == "inaccessible"
+    and batch.entries[3].status == "inaccessible", "cancel should skip all remaining jobs")
+assert(batch.seen.s1 and batch.byId.s1 == batch.entries[1], "identity index missing")
+local journalBase = "LesbhubExporter/mock/journal"
+disk[journalBase .. "/scripts/progress.jsonl"] = "old checkpoint\n"
+local analysisSeen
+local journal = Deep.new(journalBase, true, {}, nil, {analyze = function(source)
+    analysisSeen = source
+    return {synthetic = true}
+end})
+local sourceObject = {code = "return 123", GetDebugId = function() return "synthetic" end}
+journal:discover(sourceObject, {instanceId = 1, name = "x", className = "ModuleScript",
+    path = "Root/x", parentPath = "Root"}, "Root")
+failIndex = true
+journal:drain()
+failIndex = false
+assert(disk[journalBase .. "/scripts/progress.jsonl"]:sub(1, 15) == "old checkpoint\n",
+    "failed index snapshot must preserve the prior journal")
+assert(analysisSeen == sourceObject.code and journal.entries[1].analysis.synthetic,
+    "analysis must receive the exact returned code")
 assert(not pcall(Deep.new, "LesbhubExporter/../outside", true, {}))
 local unsafe = {{scriptId = "../../outside", outputPath = "", name = "x", className = "ModuleScript"}}
 assert(not pcall(function() good:resume(unsafe, function() return objects[1] end) end))

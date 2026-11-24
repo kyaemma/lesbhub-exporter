@@ -21,6 +21,29 @@ REQUIRED_RECORD = {"path", "parentPath", "name", "className", "depth", "properti
 STATUSES = {"complete", "partial", "cancelled", "stopped", "recording"}
 
 
+def digest(data: bytes, algorithm: str) -> str:
+    if algorithm == "sha256":
+        return hashlib.sha256(data).hexdigest()
+    if algorithm == "adler32":
+        return f"{zlib.adler32(data) & 0xffffffff:08x}"
+    raise ValueError("unsupported checksum algorithm")
+
+
+def safe_file(folder: Path, relative: object) -> Path:
+    if not isinstance(relative, str) or not relative or "\\" in relative:
+        raise ValueError("unsafe relative path")
+    parts = relative.split("/")
+    if (any(part in {"", ".", ".."} for part in parts)
+            or relative.startswith("/") or PureWindowsPath(relative).drive
+            or any(c in relative for c in ':<>"|?*')
+            or any(ord(c) < 32 for c in relative)):
+        raise ValueError("unsafe relative path")
+    path = folder / relative
+    if not path.resolve().is_relative_to(folder.resolve()):
+        raise ValueError("unsafe relative path")
+    return path
+
+
 def parse_chunk(path: Path, service: str, capture_pass: int,
                 category: str | None, issues: list[str]):
     try:
@@ -114,12 +137,6 @@ def validate_deep(folder: Path, manifest: dict, issues: list[str]) -> None:
                   inaccessible=0, empty=0, partial=0, skipped=0, pending=0,
                   files=0, bytes=0)
     ids, outputs = set(), set()
-    def digest(data, algorithm):
-        if algorithm == "sha256":
-            return hashlib.sha256(data).hexdigest()
-        if algorithm == "adler32":
-            return f"{zlib.adler32(data) & 0xffffffff:08x}"
-        raise ValueError("unsupported checksum algorithm")
     for n, entry in enumerate(entries, 1):
         label = f"scripts/index.json entry {n}"
         if not isinstance(entry, dict):
@@ -139,6 +156,19 @@ def validate_deep(folder: Path, manifest: dict, issues: list[str]) -> None:
         counts["succeeded" if status == "success" else status] += 1
         counts["attempted"] += bool(entry.get("attempted"))
         counts["skipped"] += bool(entry.get("skipped"))
+        diagnostic_path = entry.get("diagnosticPath")
+        if diagnostic_path is not None:
+            try:
+                file = safe_file(folder, diagnostic_path)
+                if diagnostic_path != f"errors/script-diagnostics/{script_id}.txt":
+                    raise ValueError("invalid diagnosticPath")
+                data = file.read_bytes()
+                if len(data) != entry.get("diagnosticByteLength"):
+                    raise ValueError("diagnostic byte length mismatch")
+                if digest(data, entry.get("diagnosticChecksumAlgorithm")) != entry.get("diagnosticChecksum"):
+                    raise ValueError("diagnostic checksum mismatch")
+            except (OSError, ValueError, TypeError) as exc:
+                issues.append(f"{label}: {exc}")
         output = entry["outputPath"]
         if not output:
             if status in {"success", "partial"}:
@@ -191,6 +221,135 @@ def validate_deep(folder: Path, manifest: dict, issues: list[str]) -> None:
             issues.append(f"{file.relative_to(folder)}: unindexed .luau file")
 
 
+INSPECTION_SIDECARS = {
+    "client.json", "assets/index.json", "relations/index.json", "gui/states/index.json",
+    "gui/transitions.jsonl", "errors/index.json", "artifacts/index.json",
+}
+INSPECTION_LAYERS = {"metadata", "reconstructedScripts", "gui", "remoteInventory",
+                     "remoteObservations", "runtime", "relations", "validation"}
+LAYER_STATUSES = {"complete", "partial", "unavailable", "disabled", "not_observed"}
+LEDGER_EXCLUDED = {"manifest.json", "report.json", "report.md", "artifacts/index.json"}
+
+
+def validate_inspection(folder: Path, manifest: dict, issues: list[str]) -> None:
+    if manifest.get("inspectionVersion") != 1:
+        issues.append("inspectionVersion must be 1")
+    if not isinstance(manifest.get("scriptExport"), dict):
+        issues.append("inspection manifest requires scriptExport")
+    for name in INSPECTION_SIDECARS | {"report.json", "report.md"}:
+        if not (folder / name).is_file():
+            issues.append(f"{name}: missing required inspection artifact")
+
+    try:
+        states_index = json.loads((folder / "gui/states/index.json").read_text(encoding="utf-8"))
+        states = states_index.get("states") if isinstance(states_index, dict) else None
+        if states == {}:
+            states = []
+        if not isinstance(states, list):
+            raise ValueError("states must be an array")
+        state_paths, state_ids = set(), set()
+        for state in states:
+            try:
+                if not isinstance(state, dict):
+                    raise ValueError("state entry must be an object")
+                state_id, path = state.get("stateId"), state.get("path")
+                if not isinstance(state_id, int) or isinstance(state_id, bool) or state_id < 1:
+                    raise ValueError("invalid stateId")
+                if path != f"gui/states/state{state_id:06d}.json" or state_id in state_ids:
+                    raise ValueError("invalid or duplicate state path/ID")
+                state_ids.add(state_id); state_paths.add(path)
+                projection = json.loads(safe_file(folder, path).read_text(encoding="utf-8"))
+                elements = projection.get("elements") if isinstance(projection, dict) else None
+                if elements == {}:
+                    elements = []
+                if (not isinstance(projection, dict) or projection.get("stateId") != state_id
+                        or not isinstance(elements, list) or state.get("elementCount") != len(elements)):
+                    raise ValueError("state projection differs from index")
+            except (OSError, ValueError, TypeError) as exc:
+                issues.append(f"gui/states/index.json: {exc}")
+        for file in (folder / "gui/states").glob("state*.json"):
+            if file.relative_to(folder).as_posix() not in state_paths:
+                issues.append(f"{file.relative_to(folder)}: unindexed GUI state")
+    except (OSError, ValueError, TypeError) as exc:
+        issues.append(f"gui/states/index.json: invalid state index: {exc}")
+
+    declaration = manifest.get("artifactIndex")
+    if not isinstance(declaration, dict) or declaration.get("path") != "artifacts/index.json" or declaration.get("version") != 1:
+        issues.append("manifest artifactIndex declaration is invalid")
+    try:
+        ledger = json.loads((folder / "artifacts/index.json").read_text(encoding="utf-8"))
+        if not isinstance(ledger, dict) or ledger.get("version") != 1:
+            raise ValueError("invalid ledger version")
+        artifacts = ledger.get("artifacts")
+        if artifacts == {}:
+            artifacts = []
+        if not isinstance(artifacts, list):
+            raise ValueError("artifacts must be an array")
+        recorded: set[str] = set()
+        for number, artifact in enumerate(artifacts, 1):
+            label = f"artifacts/index.json entry {number}"
+            try:
+                if not isinstance(artifact, dict):
+                    raise ValueError("artifact must be an object")
+                relative = artifact.get("path")
+                file = safe_file(folder, relative)
+                if relative in LEDGER_EXCLUDED:
+                    raise ValueError("self-referential or report artifact in ledger")
+                folded = relative.casefold()
+                if folded in recorded:
+                    raise ValueError("duplicate artifact path")
+                recorded.add(folded)
+                if not isinstance(artifact.get("kind"), str) or not artifact["kind"]:
+                    raise ValueError("artifact kind missing")
+                length = artifact.get("bytes")
+                if not isinstance(length, int) or isinstance(length, bool) or length < 0:
+                    raise ValueError("invalid artifact byte length")
+                data = file.read_bytes()
+                if len(data) != length:
+                    raise ValueError("artifact byte length mismatch")
+                if digest(data, artifact.get("checksumAlgorithm")) != artifact.get("checksum"):
+                    raise ValueError("artifact checksum mismatch")
+            except (OSError, ValueError, TypeError) as exc:
+                issues.append(f"{label}: {exc}")
+        for file in folder.rglob("*"):
+            if file.is_file():
+                relative = file.relative_to(folder).as_posix()
+                if relative not in LEDGER_EXCLUDED and relative.casefold() not in recorded:
+                    issues.append(f"{relative}: missing from artifact ledger")
+    except (OSError, ValueError, TypeError) as exc:
+        issues.append(f"artifacts/index.json: invalid ledger: {exc}")
+
+    report_ref = manifest.get("report")
+    if not isinstance(report_ref, dict) or report_ref.get("version") != 2 or report_ref.get("path") != "report.json" or report_ref.get("markdownPath") != "report.md":
+        issues.append("manifest report declaration is invalid")
+    try:
+        report = json.loads((folder / "report.json").read_text(encoding="utf-8"))
+        if not isinstance(report, dict) or report.get("reportVersion") != 2:
+            raise ValueError("invalid report version")
+        for field in ("status", "game", "stats", "partialReasons"):
+            if report.get(field) != manifest.get(field):
+                issues.append(f"report {field} differs from manifest")
+        script_stats = manifest.get("scriptExport", {}).get("stats") if isinstance(manifest.get("scriptExport"), dict) else None
+        report_scripts = report.get("scriptExport")
+        if not isinstance(report_scripts, dict) or report_scripts.get("stats") != script_stats:
+            issues.append("report scriptExport stats differ from manifest")
+        layers = report.get("layers")
+        if not isinstance(layers, dict) or set(layers) != INSPECTION_LAYERS:
+            issues.append("report layers must contain the eight inspection layers")
+        else:
+            for name, layer in layers.items():
+                if not isinstance(layer, dict) or layer.get("status") not in LAYER_STATUSES:
+                    issues.append(f"report layer {name} has invalid status")
+                    continue
+                if not isinstance(layer.get("reason"), str) or not isinstance(layer.get("counts"), dict) or not isinstance(layer.get("artifacts"), (list, dict)) or "evidence" not in layer:
+                    issues.append(f"report layer {name} has invalid fields")
+            scripts_layer = layers.get("reconstructedScripts")
+            if not isinstance(scripts_layer, dict) or scripts_layer.get("counts") != script_stats:
+                issues.append("report reconstructedScripts counts differ from manifest")
+    except (OSError, ValueError, TypeError) as exc:
+        issues.append(f"report.json: invalid report: {exc}")
+
+
 def validate_folder(folder: Path) -> list[str]:
     issues: list[str] = []
     manifest_path = folder / "manifest.json"
@@ -202,6 +361,9 @@ def validate_folder(folder: Path) -> list[str]:
         return [f"invalid manifest.json: {exc}"]
     if not isinstance(manifest, dict):
         return ["manifest must be a JSON object"]
+    version_match = re.match(r"^(\d+)\.(\d+)(?:\.|$)", str(manifest.get("exporterVersion", "")))
+    inspection = ("inspectionVersion" in manifest or
+                  bool(version_match and tuple(map(int, version_match.groups())) >= (0, 8)))
     if manifest.get("schemaVersion") != 1:
         issues.append("unsupported manifest schemaVersion")
     if manifest.get("status") not in STATUSES:
@@ -247,12 +409,16 @@ def validate_folder(folder: Path) -> list[str]:
     sidecars = {"scripts/index.json", "remotes/index.json", "gui/index.json",
                 "gui/actions.jsonl", "remotes/observations.jsonl", "report.json",
                 "scripts/progress.jsonl", "performance-local.json"}
+    if inspection:
+        sidecars |= INSPECTION_SIDECARS
     for file in folder.rglob("*"):
         if not file.is_file() or file == manifest_path:
             continue
         if file.suffix not in {".json", ".jsonl", ".csv"}:
             continue
-        if "scriptExport" in manifest and file.relative_to(folder).as_posix() in sidecars:
+        relative = file.relative_to(folder).as_posix()
+        is_gui_state = inspection and re.fullmatch(r"gui/states/state[0-9]{6,}\.json", relative)
+        if ("scriptExport" in manifest or inspection) and (relative in sidecars or is_gui_state):
             try:
                 if file.suffix == ".json":
                     json.loads(file.read_text(encoding="utf-8"))
@@ -260,8 +426,8 @@ def validate_folder(folder: Path) -> list[str]:
                     for line in file.read_text(encoding="utf-8").splitlines():
                         if line.strip():
                             row = json.loads(line)
-                            if identity_enabled and file.relative_to(folder).as_posix() in {
-                                "gui/actions.jsonl", "remotes/observations.jsonl"
+                            if (identity_enabled or inspection) and relative in {
+                                "gui/actions.jsonl", "remotes/observations.jsonl", "gui/transitions.jsonl"
                             }:
                                 if isinstance(row, dict): check_sequence(row, str(file.relative_to(folder)))
                                 else: issues.append(f"{file}: invalid diagnostic event")
@@ -305,7 +471,7 @@ def validate_folder(folder: Path) -> list[str]:
             if not isinstance(record, dict) or not REQUIRED_RECORD.issubset(record):
                 issues.append(f"{prefix}: missing required fields")
                 continue
-            if identity_enabled:
+            if identity_enabled or inspection:
                 check_sequence(record, prefix)
                 if not isinstance(record.get("instanceId"), int) or record["instanceId"] < 1:
                     issues.append(f"{prefix}: invalid instanceId")
@@ -374,6 +540,8 @@ def validate_folder(folder: Path) -> list[str]:
     if not isinstance(manifest.get("partialReasons"), list):
         issues.append("partialReasons must be an array")
     validate_deep(folder, manifest, issues)
+    if inspection:
+        validate_inspection(folder, manifest, issues)
     return issues
 
 

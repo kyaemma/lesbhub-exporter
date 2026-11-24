@@ -10,9 +10,16 @@ DEST = ROOT / "dist" / "lesbhub-exporter.lua"
 
 def engine_source():
     engine = (ROOT / "src" / "engine.lua").read_text(encoding="utf-8").rstrip()
-    deep = (ROOT / "src" / "deep_scripts.lua").read_text(encoding="utf-8").rstrip()
-    return engine.replace('local DeepScripts = require("./deep_scripts")',
-                          'local DeepScripts = (function()\n' + deep + '\nend)()')
+    for symbol, file in (("DeepScripts", "deep_scripts"),("WorkBudget", "work_budget"),
+                         ("SourceAnalysis", "source_analysis"),("RuntimeObserver", "runtime_observer"),
+                         ("GuiStates", "gui_states"),("ClientMetadata", "client_metadata"),
+                         ("Report", "report"),("Relations", "relations")):
+        token = f'local {symbol} = require("./{file}")'
+        if token not in engine:
+            continue
+        source = (ROOT / "src" / f"{file}.lua").read_text(encoding="utf-8").rstrip()
+        engine = engine.replace(token, f'local {symbol} = (function()\n' + source + '\nend)()')
+    return engine
 
 
 def bundle():

@@ -2,6 +2,9 @@
 local seenCallbacks = {}
 local unloadedCallback
 local spyCallback
+local callbacks = {}
+local mockEnv = {}
+function getgenv() return mockEnv end
 local spyCleanup = false
 local active = false
 local summary
@@ -16,9 +19,11 @@ Cobalt = {
         InterceptExecutedCalls = function(_, direction, callback)
             assert(direction == "All")
             spyCallback = callback
+            callbacks[callback] = true
             active = true
             return function()
-                active = false
+                callbacks[callback] = nil
+                active = next(callbacks) ~= nil
                 spyCleanup = true
             end
         end,
@@ -57,7 +62,26 @@ function writefile(path, data) written[path] = data end
 local plugin = require("../integrations/cobalt/LesbhubRemoteObserver")
 assert(Cobalt.PluginData.Game == "*" and Cobalt.PluginData.Name == "Lesbhub Remote Observer")
 assert(type(unloadedCallback) == "function")
-assert(not active and spyCallback == nil, "plugin must remain off until user consent")
+assert(not active and spyCallback == nil, "plugin must not subscribe until requested")
+local adapter = mockEnv.LesbhubCobaltAdapter
+assert(adapter and adapter.version == 1)
+local captured, unavailable
+local detach = adapter.subscribe(function(metadata, inst, direction, origin)
+    captured = {metadata = metadata, instance = inst, direction = direction, origin = origin}
+end, function(reason) unavailable = reason end)
+assert(active)
+local bridgeCallback = spyCallback
+local secretPayload = "SECRET_ADAPTER"
+bridgeCallback({Arguments = {secretPayload, nil, {secretPayload}, n = 3}, InvokeKind = "Request"}, remote, "Outgoing")
+assert(captured.metadata.argumentCount == 3 and captured.metadata.argumentTypes[1] == "string")
+assert(captured.metadata.argumentTypes[2] == "nil" and captured.metadata.argumentTypes[3] == "table")
+assert(captured.metadata.invokeKind == "Request" and captured.metadata.Arguments == nil)
+detach(); detach(); assert(not active)
+local detachOnUnload = adapter.subscribe(function() end, function(reason) unavailable = reason end)
+assert(active)
+unloadedCallback()
+assert(not active and unavailable == "cobalt_unloaded" and mockEnv.LesbhubCobaltAdapter == nil)
+detachOnUnload()
 assert(type(seenCallbacks["Start observing"]) == "function")
 assert(type(seenCallbacks["Stop and save summary"]) == "function")
 seenCallbacks["Start observing"]()
