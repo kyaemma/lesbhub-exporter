@@ -41,7 +41,7 @@ Potassium live results (modded Criminality variant, 2026-11-23): GUI-only captur
 | E33 | Home shortcuts | Full/GUI/Map, log and settings navigation available |
 | E34 | Map capture | floating log opens automatically and remains accessible |
 | E35 | WindUI modal button layout | long button labels stack within dialog, never overflow |
-| E36 | Native saveinstance() | native saving remains separate; standard captures reconstruct code only with the explicit v0.7 opt-in |
+| E36 | Native saveinstance() | native saving remains separate; standard captures reconstruct code by default and allow explicit opt-out |
 | E37 | Continuous capture on unrelated game | no hardcoded names or menu assumptions; starts with initial snapshot |
 | E38 | Open new client menu during monitoring | new GUI nodes appear in delta files with `operation=add` |
 | E39 | Modify existing GUI Text/Visible | subsequent delta has `operation=update`; unchanged records omitted |
@@ -69,7 +69,7 @@ For each run record: executor version, client FPS before/during/after, duration,
 | E57 | Cobalt integration unload | interceptor cleanup occurs; no replay, blocking, raw arguments or uploads |
 
 
-| E58 | Reconstructed client code opt-in | real `.luau`, protected decompile, exact readback and syntax check, never execute returned code |
+| E58 | Reconstructed client code default | all presets and engine export `.luau` by default; protected decompile, exact readback and syntax check, never execute returned code |
 | E59 | >2000 lines / large source | no artificial text cap; source checksum matches returned bytes |
 | E60 | Empty/failed/unavailable decompile | truthful per-script status, no placeholder code files |
 | E61 | File integrity / cancellation | no false success; partial writes and cancellation are reported |
@@ -77,3 +77,5 @@ For each run record: executor version, client FPS before/during/after, duration,
 | E63 | Instance identity / short events | distinct homonyms/replacements, stable rename ID, events retained before baseline visit |
 | E64 | Global sequence / diagnostics | unique order across chunks, operator activations and optional Cobalt records |
 | E65 | Public repository hygiene | no private game source, capture files, payloads or user identities committed |
+
+| E62 | Metadata-only choice | Advanced toggle disables Luau extraction explicitly without disabling GUI/structural export |
