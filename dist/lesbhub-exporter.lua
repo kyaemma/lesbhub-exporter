@@ -3,9 +3,269 @@
 
 local function loadEngine()
 -- Lesbhub Exporter V1 - client-side, read-only capture engine.
--- No script source, remote invocation, executor introspection, or network upload.
+-- Reconstructed client code is explicit opt-in; no remote invocation or uploads.
+local DeepScripts = (function()
+-- Optional reconstructed-code writer. Never requires or executes captured modules.
+local Deep = {}
+local Http = game:GetService("HttpService")
+local runtime = (type(getgenv) == "function" and getgenv()) or {}
+runtime.LesbhubDeepRuntimeToken = runtime.LesbhubDeepRuntimeToken or tostring(os.clock()) .. tostring({})
+Deep.runtimeToken = runtime.LesbhubDeepRuntimeToken
+
+local function safeSegment(value, maximum)
+    local result = tostring(value or "script"):gsub("[^%w_-]", "_")
+    result = result:sub(1, maximum or 42)
+    return result ~= "" and result or "script"
+end
+
+local function folders(path)
+    local current = ""
+    for part in path:gmatch("[^/]+") do
+        assert(part ~= ".." and part ~= ".", "unsafe directory")
+        current = current == "" and part or current .. "/" .. part
+        local ok, exists = pcall(function() return type(isfolder) == "function" and isfolder(current) end)
+        if not (ok and exists) then
+            local made, err = pcall(makefolder, current)
+            if not made then
+                local checked, found = pcall(function() return isfolder(current) end)
+                assert(checked and found, tostring(err))
+            end
+        end
+    end
+end
+
+local function hasCode(source)
+    local position = 1
+    while true do
+        position = source:find("%S", position)
+        if not position then return false end
+        if source:sub(position, position + 1) ~= "--" then return true end
+        local start, finish, equals = source:find("%-%-%[(=*)%[", position)
+        if start == position then
+            local _, closing = source:find("]" .. equals .. "]", finish + 1, true)
+            if not closing then return false end
+            position = closing + 1
+        else
+            local newline = source:find("\n", position + 2, true)
+            if not newline then return false end
+            position = newline + 1
+        end
+    end
+end
+
+function Deep.capabilities()
+    return {decompile = type(decompile) == "function", writefile = type(writefile) == "function",
+        appendfile = type(appendfile) == "function", readfile = type(readfile) == "function",
+        isfile = type(isfile) == "function", makefolder = type(makefolder) == "function",
+        syntaxCheck = type(loadstring) == "function",
+        sha256 = type(crypt) == "table" and type(crypt.hash) == "function"}
+end
+
+function Deep.checksum(text)
+    if type(crypt) == "table" and type(crypt.hash) == "function" then
+        local ok, hash = pcall(crypt.hash, text, "sha256")
+        if ok and type(hash) == "string" and #hash == 64 and hash:match("^%x+$") then
+            return hash:lower(), "sha256"
+        end
+    end
+    -- Portable integrity check, clearly named; not a cryptographic hash.
+    local a, b = 1, 0
+    for i = 1, #text do
+        a = (a + text:byte(i)) % 65521
+        b = (b + a) % 65521
+        if i % 65536 == 0 then task.wait() end
+    end
+    return string.format("%08x", b * 65536 + a), "adler32"
+end
+
+function Deep.new(base, enabled, control, progress)
+    assert(type(base) == "string" and base:sub(1, 16) == "LesbhubExporter/", "unsafe export root")
+    assert(not base:find("\\") and not base:find(":") and not base:find("//"), "unsafe export root")
+    for part in base:gmatch("[^/]+") do assert(part ~= "." and part ~= "..", "unsafe export root") end
+    local self = {enabled = enabled, entries = {}, queue = {}, seen = {}, byId = {},
+        capabilities = Deep.capabilities(), indexPath = "scripts/index.json", failures = {}}
+    local start = os.clock()
+    local function cancelled() return control and control.cancelled == true end
+    local function counts()
+        local result = {discovered = #self.entries, attempted = 0, succeeded = 0,
+            failed = 0, inaccessible = 0, empty = 0, partial = 0, skipped = 0,
+            pending = 0, files = 0, bytes = 0}
+        for _, entry in ipairs(self.entries) do
+            if entry.attempted then result.attempted = result.attempted + 1 end
+            if entry.skipped then result.skipped = result.skipped + 1 end
+            if entry.status == "success" then result.succeeded = result.succeeded + 1
+            elseif result[entry.status] ~= nil then result[entry.status] = result[entry.status] + 1 end
+            if entry.verifiedReadback then
+                result.files = result.files + 1; result.bytes = result.bytes + entry.fileByteLength
+            end
+        end
+        return result
+    end
+    function self:summary()
+        return {version = 1, enabled = self.enabled, indexPath = self.indexPath,
+            capabilities = self.capabilities, stats = counts(), indexWritten = self.indexWritten == true,
+            runtimeToken = Deep.runtimeToken,
+            elapsedSeconds = os.clock() - start, error = self.indexError or "",
+            scope = "selected client-visible instances; reconstructed pseudocode, not original source"}
+    end
+    local function textSafe(value)
+        local ok = pcall(function() Http:JSONEncode(value) end)
+        if ok then return value end
+        return (tostring(value):gsub("[^ -~]", function(c) return string.format("~%02X", c:byte()) end))
+    end
+    function self:saveIndex()
+        local ok, err = pcall(function()
+            folders(base .. "/scripts")
+            writefile(base .. "/" .. self.indexPath, Http:JSONEncode({version = 1,
+                stats = counts(), capabilities = self.capabilities, scripts = self.entries}))
+        end)
+        self.indexWritten = ok
+        self.indexError = not ok and tostring(err) or nil
+        return ok, err
+    end
+    function self:discover(instance, record, service)
+        local id = "s" .. tostring(record.instanceId)
+        if self.seen[id] then
+            record.scriptId = id
+            self.byId[id].latestObservedPath = textSafe(record.path)
+            return
+        end
+        self.seen[id] = true; record.scriptId = id
+        local debugOk, debugId = pcall(function() return instance:GetDebugId() end)
+        local entry = {scriptId = id, instanceId = record.instanceId,
+            name = textSafe(record.name), className = record.className, service = service,
+            robloxPath = textSafe(record.path), guiPath = service == "PlayerGui" and textSafe(record.parentPath) or "",
+            latestObservedPath = textSafe(record.path),
+            debugId = debugOk and textSafe(debugId) or "unavailable", method = "decompile",
+            status = "pending", error = "", outputPath = "", byteLength = 0, lineCount = 0,
+            checksum = "", checksumAlgorithm = "", truncationDetected = false,
+            truncationAssessment = "unknown", attempted = false}
+        self.entries[#self.entries + 1] = entry
+        self.byId[id] = entry
+        if self.enabled then self.queue[#self.queue + 1] = {instance = instance, entry = entry}
+        else entry.status = "inaccessible"; entry.error = "reconstructed code not enabled"; entry.skipped = true end
+    end
+    local function extract(job)
+        local entry = job.entry
+        if cancelled() then entry.status = "inaccessible"; entry.error = "cancelled"; entry.skipped = true; return end
+        if not self.capabilities.decompile then
+            entry.status = "inaccessible"; entry.error = "decompile is unavailable"; entry.skipped = true; return
+        end
+        entry.attempted = true
+        local at = os.clock()
+        local ok, source = pcall(decompile, job.instance)
+        entry.elapsedSeconds = os.clock() - at
+        if not ok then entry.status = "failed"; entry.error = textSafe(tostring(source)); return end
+        if type(source) ~= "string" or not source:find("%S") then entry.status = "empty"; entry.error = "empty decompiler result"; return end
+        if not hasCode(source) then
+            entry.status = "empty"; entry.error = "decompiler returned comments only"; return
+        end
+        entry.byteLength = #source
+        entry.lineCount = select(2, source:gsub("\n", "")) + 1
+        entry.checksum, entry.checksumAlgorithm = Deep.checksum(source)
+        local lower = source:lower()
+        local firstLine, lastLine, total = source:match("%-%- Lines (%d+)%-(%d+) of (%d+)")
+        entry.truncationDetected = (firstLine ~= nil and (tonumber(firstLine) > 1 or tonumber(lastLine) < tonumber(total)))
+            or lower:find("[truncated]", 1, true) ~= nil
+            or lower:find("-- truncated", 1, true) ~= nil
+        entry.truncationAssessment = entry.truncationDetected and "explicit_marker" or "not_observed_not_guaranteed"
+        local syntaxOk, syntaxError = false, "loadstring unavailable"
+        if self.capabilities.syntaxCheck then
+            local checked, fn, why = pcall(loadstring, source, "@reconstructed/" .. entry.scriptId)
+            syntaxOk = checked and type(fn) == "function"
+            syntaxError = checked and tostring(why or "") or tostring(fn)
+        end
+        entry.compiles = syntaxOk; entry.compileError = syntaxOk and "" or textSafe(syntaxError)
+        local utf8Ok = pcall(function() assert(utf8.len(source), "invalid UTF-8") end)
+        entry.encoding = utf8Ok and "utf-8" or "invalid-utf8-preserved"
+        local relative = "scripts/sources/" .. safeSegment(entry.service) .. "/" .. entry.scriptId .. "_"
+        local budget = math.max(1, math.min(42, 239 - #base - #relative - 6))
+        entry.outputPath = relative .. safeSegment(entry.name, budget) .. ".luau"
+        local header = "-- Reconstructed client pseudocode; original source is unavailable.\n"
+            .. "-- Roblox path: " .. entry.robloxPath:gsub("[\r\n]", " ")
+            .. "\n-- Class: " .. entry.className .. "\n-- DebugId: " .. entry.debugId:gsub("[\r\n]", " ")
+            .. "\n-- ScriptId: " .. entry.scriptId .. "\n\n"
+        local filename, content = base .. "/" .. entry.outputPath, header .. source
+        entry.headerByteLength = #header; entry.fileByteLength = #content
+        entry.fileChecksum, entry.fileChecksumAlgorithm = Deep.checksum(content)
+        if cancelled() then entry.status = "inaccessible"; entry.error = "cancelled"; entry.skipped = true; return end
+        local written, writeError = pcall(function()
+            folders(filename:match("^(.*)/[^/]+$"))
+            -- Resume an interrupted extraction in this capture only, after exact verification.
+            if self.capabilities.isfile and self.capabilities.readfile and isfile(filename)
+                and readfile(filename) == content then entry.skipped = true
+            elseif self.capabilities.appendfile then
+                writefile(filename, header)
+                for offset = 1, #source, 65536 do
+                    if cancelled() then error("cancelled during write") end
+                    appendfile(filename, source:sub(offset, offset + 65535))
+                    task.wait()
+                end
+            else writefile(filename, content) end
+            assert(self.capabilities.isfile and self.capabilities.readfile, "file readback unavailable")
+            assert(isfile(filename), "file missing after write")
+            assert(readfile(filename) == content, "file readback mismatch")
+            entry.verifiedReadback = true
+        end)
+        if not written then entry.status = "failed"; entry.error = textSafe(tostring(writeError)); return end
+        entry.status = syntaxOk and utf8Ok and not entry.truncationDetected and "success" or "partial"
+        if entry.status == "partial" then entry.error = entry.truncationDetected and "truncation marker detected"
+            or (not utf8Ok and "invalid UTF-8 preserved" or "reconstructed code did not pass syntax check") end
+    end
+    function self:drain()
+        if not self.enabled then return end
+        self:saveIndex()
+        for _, job in ipairs(self.queue) do
+            if type(progress) == "function" then progress(job.entry) end
+            local ok, err = pcall(extract, job)
+            if not ok then job.entry.status = "failed"; job.entry.error = textSafe(tostring(err)) end
+            job.instance = nil
+            if self.capabilities.appendfile then
+                local checkpointed = pcall(function()
+                    local path = base .. "/scripts/progress.jsonl"
+                    if not self.progressStarted then writefile(path, ""); self.progressStarted = true end
+                    appendfile(path, Http:JSONEncode(job.entry) .. "\n")
+                end)
+                if not checkpointed then self:saveIndex() end
+            else self:saveIndex() end -- fallback when appendfile is unavailable
+            task.wait()
+        end
+        table.clear(self.queue)
+        self:saveIndex()
+    end
+    function self:resume(entries, resolve)
+        self.entries = entries
+        for _, entry in ipairs(entries) do
+            assert(type(entry.scriptId) == "string" and entry.scriptId:match("^s%d+$"), "unsafe scriptId")
+            assert(type(entry.outputPath) == "string" and type(entry.name) == "string", "malformed script entry")
+            assert(entry.className == "LocalScript" or entry.className == "ModuleScript"
+                or entry.className == "Script", "unexpected script class")
+            local verified = false
+            if entry.verifiedReadback and entry.outputPath:match("^scripts/sources/[%w_/-]+%.luau$")
+                and not entry.outputPath:find("..", 1, true) then
+                local ok, content = pcall(function() return readfile(base .. "/" .. entry.outputPath) end)
+                if ok then
+                    local checksum, algorithm = Deep.checksum(content)
+                    verified = checksum == entry.fileChecksum and algorithm == entry.fileChecksumAlgorithm
+                end
+            end
+            if verified and entry.status == "success" then entry.skipped = true
+            else
+                local instance = resolve(entry)
+                entry.verifiedReadback = false
+                if instance then self.queue[#self.queue + 1] = {entry = entry, instance = instance}
+                else entry.status = "inaccessible"; entry.error = "original instance is unavailable in this session" end
+            end
+        end
+        self:drain()
+    end
+    return self
+end
+
+return Deep
+end)()
 local Exporter = {}
-Exporter.VERSION = "0.6.0"
+Exporter.VERSION = "0.7.0"
 Exporter.SCHEMA_VERSION = 1
 Exporter.TARGETS = {
     "ReplicatedStorage", "ReplicatedFirst", "StarterGui", "PlayerGui",
@@ -15,6 +275,19 @@ Exporter.TARGETS = {
 
 local HttpService = game:GetService("HttpService")
 local Players = game:GetService("Players")
+
+local function portableJson(value)
+    if type(value) == "string" then
+        local ok, length = pcall(utf8.len, value)
+        if ok and length then return value end
+        return (value:gsub("[^ -~]", function(c) return string.format("~%02X", c:byte()) end))
+    elseif type(value) == "table" then
+        local copy = {}
+        for key, item in pairs(value) do copy[portableJson(key)] = portableJson(item) end
+        return copy
+    end
+    return value
+end
 
 local GUI_COMMON = {
     "Visible", "Position", "Size", "AnchorPoint", "LayoutOrder", "ZIndex",
@@ -588,11 +861,13 @@ local function encodeChunk(records, format, service, pass, category)
         return table.concat(lines, "\n") .. "\n"
     end
     if format == "csv" then
-        local lines = {"path,parentPath,name,className,depth,properties_json"}
+        local lines = {"path,parentPath,name,className,depth,properties_json,instanceId,parentInstanceId,sequence,scriptId,operation,observedAtUtc"}
         for _, record in ipairs(records) do
             local values = {record.path, record.parentPath, record.name, record.className,
                 record.depth, HttpService:JSONEncode(record.properties) == "[]"
-                    and "{}" or HttpService:JSONEncode(record.properties)}
+                    and "{}" or HttpService:JSONEncode(record.properties),
+                record.instanceId or "", record.parentInstanceId or "", record.sequence or "",
+                record.scriptId or "", record.operation or "", record.observedAtUtc or ""}
             for i, value in ipairs(values) do values[i] = csvEscape(value) end
             table.insert(lines, table.concat(values, ","))
         end
@@ -629,6 +904,9 @@ local function normalizedConfig(input)
     cfg.assets = input.assets ~= false
     cfg.includeAttributes = input.includeAttributes ~= false
     cfg.includeTags = input.includeTags ~= false
+    cfg.includeReconstructedCode = input.includeReconstructedCode ~= false
+    cfg.observeGuiActions = input.observeGuiActions == true
+    cfg.observeRemotes = input.observeRemotes == true
     cfg.textboxValues = input.textboxValues == true
     cfg.stringValues = input.stringValues == true
     cfg.twoPassGui = input.twoPassGui == true
@@ -692,7 +970,7 @@ local function recordFingerprint(record)
     return tostring(record.className) .. "|" .. stableValue(record.properties or {}, 0)
 end
 
-function Exporter.capture(options, onProgress, control)
+local function capture(options, onProgress, control)
     local cfg = normalizedConfig(options)
     control = type(control) == "table" and control or {}
     if type(writefile) ~= "function" or type(makefolder) ~= "function" then
@@ -734,6 +1012,137 @@ function Exporter.capture(options, onProgress, control)
     local chunkIndexes = {}
     local createdDataFolders = {}
     local serviceSnapshots = {}
+    local instanceIds = setmetatable({}, {__mode = "k"})
+    local debugIdentities = {}
+    local nextInstanceId, nextSequence = 0, 0
+    local remoteIndex, guiIndex = {}, {}
+    local diagnostics = {guiActions = 0, remoteObservations = 0, writeErrors = 0,
+        cobaltAttached = false, knownCallers = 0}
+    local diagnosticConnections, guiWatched = {}, setmetatable({}, {__mode = "k"})
+    local diagnosticBuffers = { ["gui/actions.jsonl"] = {}, ["remotes/observations.jsonl"] = {} }
+    local diagnosticWritten = {}
+    local flushDiagnostics
+    local function diagnosticEvent(path, event)
+        nextSequence = nextSequence + 1
+        event.sequence = nextSequence
+        event.observedAtUtc = os.date("!%Y-%m-%dT%H:%M:%SZ")
+        diagnosticBuffers[path][#diagnosticBuffers[path] + 1] = event
+    end
+    flushDiagnostics = function()
+        for path, rows in pairs(diagnosticBuffers) do
+            if #rows > 0 then
+                local ok = pcall(function()
+                    assert(createFolders((base .. "/" .. path):match("^(.*)/[^/]+$")))
+                    local parts = {}
+                    for _, row in ipairs(rows) do parts[#parts + 1] = HttpService:JSONEncode(portableJson(row)) end
+                    local content = table.concat(parts, "\n") .. "\n"
+                    if type(appendfile) == "function" then
+                        if not diagnosticWritten[path] then writefile(base .. "/" .. path, "") end
+                        appendfile(base .. "/" .. path, content)
+                    else
+                        local previous = diagnosticWritten[path] and readfile(base .. "/" .. path) or ""
+                        writefile(base .. "/" .. path, previous .. content)
+                    end
+                    diagnosticWritten[path] = true
+                end)
+                if ok then table.clear(rows)
+                else diagnostics.writeErrors = diagnostics.writeErrors + 1; partial("diagnostic_write_failed") end
+            end
+        end
+    end
+    local deep = DeepScripts.new(base, cfg.includeReconstructedCode, control, function(entry)
+        flushDiagnostics()
+        state.currentPath = entry.robloxPath
+        notify(onProgress, "extracting_script", state, entry.name)
+    end)
+    local function identity(instance)
+        if not instance then return nil end
+        local id = instanceIds[instance]
+        if not id then
+            local debugId
+            local ok, class = pcall(function() return instance.ClassName end)
+            if ok and (REMOTE_CLASSES[class] or class == "LocalScript" or class == "ModuleScript" or class == "Script") then
+                local readable, value = pcall(function() return instance:GetDebugId() end)
+                if readable then debugId = class .. ":" .. value end
+            end
+            local previous = debugId and debugIdentities[debugId]
+            if previous and type(compareinstances) == "function" then
+                local compared, equal = pcall(compareinstances, instance, previous.instance)
+                if compared and equal then id = previous.id end
+            end
+            if not id then nextInstanceId = nextInstanceId + 1; id = nextInstanceId end
+            instanceIds[instance] = id
+            if debugId then debugIdentities[debugId] = {id = id, instance = instance} end
+        end
+        return id
+    end
+    local function identify(record, instance, service)
+        record.instanceId = identity(instance)
+        local ok, parent = pcall(function() return instance.Parent end)
+        record.parentInstanceId = ok and parent and identity(parent) or nil
+        if record.category == "scripts" or record.className == "LocalScript"
+            or record.className == "ModuleScript" or record.className == "Script" then
+            deep:discover(instance, record, service or state.currentService)
+        end
+        if cfg.observeGuiActions and not guiWatched[instance]
+            and (record.className == "TextButton" or record.className == "ImageButton") then
+            local ok, connection = pcall(function()
+                return instance.Activated:Connect(function()
+                    diagnosticEvent("gui/actions.jsonl", {event = "activated",
+                        instanceId = record.instanceId, robloxPath = record.path,
+                        evidence = "operator_activation"})
+                    diagnostics.guiActions = diagnostics.guiActions + 1
+                end)
+            end)
+            if ok then guiWatched[instance] = true; diagnosticConnections[#diagnosticConnections + 1] = connection end
+        end
+    end
+    local function observeRecord(record, service, mode, instance)
+        local snapshot = serviceSnapshots[service]
+        if not snapshot then snapshot = {}; serviceSnapshots[service] = snapshot end
+        local previous = snapshot[record.instanceId]
+        local signature = cfg.continuous and (recordFingerprint(record) .. "|" .. record.path
+            .. "|" .. tostring(record.parentInstanceId)) or nil
+        if cfg.continuous then
+            if mode == "remove" then
+                if not previous then return false end
+                record.operation = "remove"
+                snapshot[record.instanceId] = nil
+            else
+                if previous and previous.signature == signature then return false end
+                record.operation = previous and "update" or (mode ~= "baseline" and "add" or nil)
+            end
+        end
+        nextSequence = nextSequence + 1
+        record.sequence = nextSequence
+        record.observedAtUtc = record.observedAtUtc or os.date("!%Y-%m-%dT%H:%M:%SZ")
+        if cfg.continuous and mode ~= "remove" then
+            snapshot[record.instanceId] = {signature = signature, name = record.name,
+                className = record.className, path = record.path, parentPath = record.parentPath,
+                depth = record.depth, category = record.category, instanceId = record.instanceId,
+                parentInstanceId = record.parentInstanceId, sequence = record.sequence, instance = instance}
+        end
+        if record.operation then
+            state.deltaRecords = state.deltaRecords + 1
+            if record.operation == "remove" then state.removed = state.removed + 1
+            elseif record.operation == "update" then state.updated = state.updated + 1
+            else state.added = state.added + 1 end
+        end
+        if REMOTE_CLASSES[record.className] then
+            local previousRemote = remoteIndex[record.instanceId]
+            remoteIndex[record.instanceId] = {instanceId = record.instanceId, name = record.name,
+                robloxPath = record.path, className = record.className, service = service,
+                evidence = "static_inventory", knownScriptLinks = {},
+                observedScriptLinks = previousRemote and previousRemote.observedScriptLinks or {}}
+        elseif record.category == "gui" then
+            guiIndex[record.instanceId] = {instanceId = record.instanceId, name = record.name,
+                robloxPath = record.path, className = record.className, service = service,
+                parentInstanceId = record.parentInstanceId, sequence = record.sequence,
+                visible = record.properties.Visible, enabled = record.properties.Enabled,
+                text = record.properties.Text, operation = record.operation}
+        end
+        return true
+    end
     local function targetDirectory(category, service)
         if not cfg.organizedOutput then return base end
         return base .. "/" .. category .. "/" .. service
@@ -762,6 +1171,8 @@ function Exporter.capture(options, onProgress, control)
             category = record.category,
             operation = record.operation,
             observedAtUtc = record.observedAtUtc,
+            instanceId = record.instanceId, parentInstanceId = record.parentInstanceId,
+            sequence = record.sequence, scriptId = record.scriptId,
             properties = {},
         }
         for key, value in pairs(record.properties or {}) do
@@ -896,9 +1307,9 @@ function Exporter.capture(options, onProgress, control)
     local function scan(serviceName, pass, mode)
         if stopCheck() then return end
         local deltaMode = cfg.continuous and mode == "delta"
-        local baselineMode = cfg.continuous and mode ~= "delta" and serviceName ~= "Workspace"
         local previousSnapshot = serviceSnapshots[serviceName] or {}
-        local currentSnapshot = deltaMode and {} or (baselineMode and {} or nil)
+        local seenIds = {}
+        local scanStartSequence = nextSequence
         local root = rootInstance(serviceName)
         if not root then
             partial("missing_root:" .. serviceName)
@@ -952,26 +1363,10 @@ function Exporter.capture(options, onProgress, control)
                         parentPath = frame.parent, depth = frame.depth, properties = properties,
                         category = category,
                     }
-                    local include = true
-                    if deltaMode or baselineMode then
-                        local signature = recordFingerprint(record)
-                        currentSnapshot[record.path] = {
-                            signature = signature, name = name, className = class,
-                            path = record.path, parentPath = record.parentPath,
-                            depth = record.depth, category = category,
-                        }
-                        local previous = previousSnapshot[record.path]
-                        if deltaMode then
-                            include = not previous or previous.signature ~= signature
-                            if include then
-                                record.operation = previous and "update" or "add"
-                                record.observedAtUtc = os.date("!%Y-%m-%dT%H:%M:%SZ")
-                                state.deltaRecords = state.deltaRecords + 1
-                                if previous then state.updated = state.updated + 1
-                                else state.added = state.added + 1 end
-                            end
-                        end
-                    end
+                    identify(record, obj)
+                    seenIds[record.instanceId] = true
+                    local include = observeRecord(record, serviceName,
+                        deltaMode and "delta" or "baseline", obj)
                     if include and not bufferRecord(buckets, record, serviceName, pass, category) then
                         state.stopped = true
                         break
@@ -1012,6 +1407,7 @@ function Exporter.capture(options, onProgress, control)
             state.pending = math.max(0, state.discovered - state.visited)
             steps = steps + 1
             if steps % cfg.yieldEvery == 0 then
+                flushDiagnostics()
                 notify(onProgress, "scanning", state, serviceName)
                 task.wait()
             end
@@ -1021,21 +1417,21 @@ function Exporter.capture(options, onProgress, control)
         -- even when that instance no longer exists on the client.
         if deltaMode and not state.stopped then
             local inspected = 0
-            for path, previous in pairs(previousSnapshot) do
+            for id, previous in pairs(previousSnapshot) do
                 if stopCheck() then break end
-                if currentSnapshot[path] == nil then
+                if not seenIds[id] and previous.sequence <= scanStartSequence then
                     local tombstone = {
                         operation = "remove", observedAtUtc = os.date("!%Y-%m-%dT%H:%M:%SZ"),
                         name = previous.name, className = previous.className,
                         path = previous.path, parentPath = previous.parentPath,
-                        depth = previous.depth, properties = {},
+                        depth = previous.depth, properties = {}, category = previous.category,
+                        instanceId = previous.instanceId, parentInstanceId = previous.parentInstanceId,
                     }
+                    observeRecord(tombstone, serviceName, "remove")
                     if not bufferRecord(buckets, tombstone, serviceName, pass,
                         previous.category or categoryFor(nil, serviceName, previous.className)) then
                         state.stopped = true; break
                     end
-                    state.deltaRecords = state.deltaRecords + 1
-                    state.removed = state.removed + 1
                 end
                 inspected = inspected + 1
                 if inspected % cfg.yieldEvery == 0 then task.wait() end
@@ -1045,50 +1441,18 @@ function Exporter.capture(options, onProgress, control)
         if not state.stopped or state.cancelled or state.stopRequested then
             if not flushBuckets(buckets, serviceName, pass) then state.stopped = true end
         end
-        if currentSnapshot and not state.stopped then
-            serviceSnapshots[serviceName] = currentSnapshot
-        end
         state.pending = 0
         notify(onProgress, "service_done", state, serviceName)
-    end
-
-    local selected = 0
-    for _, service in ipairs(Exporter.TARGETS) do
-        if cfg.targets[service] then
-            selected = selected + 1
-            scan(service, 1)
-            if state.stopped then break end
-        end
-    end
-    if selected == 0 then partial("no_targets") end
-
-    if cfg.targets.Workspace then
-        local ok, streaming = pcall(function() return workspace.StreamingEnabled end)
-        if ok and streaming then partial("workspace_streaming_enabled") end
-    end
-
-    if not cfg.continuous and cfg.twoPassGui and not state.stopped
-        and (cfg.targets.PlayerGui or cfg.targets.StarterGui) then
-        for pass = 2, cfg.guiPasses do
-            notify(onProgress, "waiting_gui_pass", state, "PlayerGui")
-            local deadline = os.clock() + cfg.secondPassDelay
-            while os.clock() < deadline and not stopCheck() do task.wait(0.1) end
-            if state.stopped then break end
-            for _, service in ipairs({"PlayerGui", "StarterGui"}) do
-                if cfg.targets[service] then scan(service, pass) end
-                if state.stopped then break end
-            end
-            if state.stopped then break end
-        end
     end
 
     -- A provisional manifest makes long-running sessions inspectable and
     -- recoverable even if Roblox/executor exits without an orderly Stop.
     local function checkpoint()
+        flushDiagnostics()
         local payload = {
             schemaVersion = Exporter.SCHEMA_VERSION,
             exporterVersion = Exporter.VERSION, clientOnly = true,
-            status = "recording", captureMode = "continuous",
+            status = "recording", captureMode = cfg.continuous and "continuous" or "exhaustive",
             capturedAtUtc = os.date("!%Y-%m-%dT%H:%M:%SZ"),
             game = {
                 label = sanitizedString(cfg.label, cfg, state),
@@ -1105,14 +1469,18 @@ function Exporter.capture(options, onProgress, control)
                 added = state.added, updated = state.updated, removed = state.removed,
             },
             services = state.services,
+            scriptExport = deep:summary(),
+            diagnostics = diagnostics,
+            identity = {version = 1, scope = "capture_local", ordering = "sequence", lastSequence = nextSequence},
             categories = state.categories,
             layout = {version = cfg.organizedOutput and 2 or 1,
                 id = cfg.organizedOutput and "categorized" or "flat"},
             errors = state.errors,
             partialReasons = {},
             settings = {format = cfg.format, chunkSize = cfg.chunkSize,
-                continuous = true, continuousInterval = cfg.continuousInterval,
-                captureMode = "continuous", targets = cfg.targets,
+                continuous = cfg.continuous, continuousInterval = cfg.continuousInterval,
+                captureMode = cfg.continuous and "continuous" or "exhaustive", targets = cfg.targets,
+                includeReconstructedCode = cfg.includeReconstructedCode,
                 organizedOutput = cfg.organizedOutput,
                 includeAttributes = cfg.includeAttributes,
                 includeTags = cfg.includeTags},
@@ -1162,12 +1530,24 @@ function Exporter.capture(options, onProgress, control)
     local function enqueue(service, root, instance, operation)
         local path, parent, depth = pathFor(instance, service, root)
         if not path then return end
+        local okClass, class = pcall(function() return instance.ClassName end)
+        if not okClass then return end
+        local category = categoryFor(instance, service, class)
+        local record = {name = readName(instance, cfg, state), className = class,
+            path = path, parentPath = parent, depth = depth, category = category,
+            properties = operation == "remove" and {} or collectProperties(instance, cfg, state)}
+        record.instanceId = identity(instance)
+        local okParent, parentInstance = pcall(function() return instance.Parent end)
+        record.parentInstanceId = okParent and identity(parentInstance) or nil
+        if operation == "remove" and not (serviceSnapshots[service] or {})[record.instanceId] then
+            -- Existing object disappeared before its baseline visit: preserve it
+            -- while DescendantRemoving still exposes the original instance.
+            enqueue(service, root, instance, "add")
+        end
+        if not observeRecord(record, service, operation, instance) then return end
+        identify(record, instance, service)
         eventTail = eventTail + 1
-        events[eventTail] = {
-            instance = instance, service = service, operation = operation,
-            path = path, parentPath = parent, depth = depth,
-            at = os.date("!%Y-%m-%dT%H:%M:%SZ"),
-        }
+        events[eventTail] = {service = service, record = record}
     end
 
     local function attachListeners()
@@ -1200,6 +1580,7 @@ function Exporter.capture(options, onProgress, control)
     end
 
     local function processEvents(drain)
+        flushDiagnostics()
         local perService = {}
         local steps = 0
         while eventHead <= eventTail and (drain or not stopCheck()) do
@@ -1207,45 +1588,12 @@ function Exporter.capture(options, onProgress, control)
             events[eventHead] = nil
             eventHead = eventHead + 1
             if event then
-                local classOk, class = pcall(function() return event.instance.ClassName end)
-                if not classOk then class = "Unknown" end
-                local name = event.path:match("([^/]+)$") or "Unknown"
-                local props = {}
-                if event.operation == "add" then
-                    props = collectProperties(event.instance, cfg, state)
-                end
-                local record = {
-                    operation = event.operation,
-                    observedAtUtc = event.at,
-                    name = name, className = class, depth = event.depth,
-                    path = event.path, parentPath = event.parentPath,
-                    properties = props,
-                }
-                local snapshot = serviceSnapshots[event.service]
-                local old = snapshot and snapshot[event.path]
-                if event.operation == "remove" then
-                    if snapshot then snapshot[event.path] = nil end
-                    state.removed = state.removed + 1
-                else
-                    if old then
-                        record.operation = "update"
-                        state.updated = state.updated + 1
-                    else
-                        state.added = state.added + 1
-                    end
-                    if snapshot then
-                        snapshot[event.path] = {
-                            signature = recordFingerprint(record),
-                            name = name, className = class, path = event.path,
-                            parentPath = event.parentPath, depth = event.depth,
-                        }
-                    end
-                end
-                state.deltaRecords = state.deltaRecords + 1
+                local record = event.record
+                local class = record.className
                 state.visited = state.visited + 1
                 state.discovered = state.discovered + 1
                 state.currentService = event.service
-                state.currentPath = event.path
+                state.currentPath = record.path
                 state.currentClass = class
                 state.currentPass = 2
                 state.classes[class] = (state.classes[class] or 0) + 1
@@ -1259,7 +1607,7 @@ function Exporter.capture(options, onProgress, control)
                         perService[event.service] = buckets
                     end
                     if not bufferRecord(buckets, record, event.service, 2,
-                        categoryFor(event.instance, event.service, class)) then
+                        record.category) then
                         state.stopped = true
                         break
                     end
@@ -1281,6 +1629,100 @@ function Exporter.capture(options, onProgress, control)
         end
     end
 
+    local shared = (type(getgenv) == "function" and getgenv()) or {}
+    local bridge
+    control._lesbhubCleanup = function()
+        disconnectMonitoring()
+        for _, connection in ipairs(diagnosticConnections) do pcall(function() connection:Disconnect() end) end
+        if bridge and shared.LesbhubExporterObserveRemote == bridge then shared.LesbhubExporterObserveRemote = nil end
+    end
+    if cfg.observeRemotes then
+        local selectedRoots = {}
+        for name in pairs(cfg.targets) do
+            local root = rootInstance(name)
+            if root then selectedRoots[name] = root end
+        end
+        bridge = function(info, remote, direction)
+            if direction ~= "Incoming" and direction ~= "Outgoing" then return end
+            local service, root
+            for name, candidate in pairs(selectedRoots) do
+                local ok, inside = pcall(function() return remote:IsDescendantOf(candidate) end)
+                if candidate and ok and inside then service, root = name, candidate; break end
+            end
+            if not root then return end
+            local path = pathFor(remote, service, root)
+            if not path or not REMOTE_CLASSES[remote.ClassName] then return end
+            local id = identity(remote)
+            -- Cobalt documents info.Origin. Accept an actual Instance only;
+            -- never infer a caller from a string, script name or similar path.
+            local caller = type(info) == "table" and info.Origin or nil
+            local scriptId
+            if typeof(caller) == "Instance" then
+                local callerId = identity(caller)
+                if callerId and deep.seen["s" .. callerId] then scriptId = "s" .. callerId end
+            end
+            local args = type(info) == "table" and info.Arguments or nil
+            local types, count = {}, type(args) == "table" and (tonumber(args.n) or #args) or 0
+            for i = 1, math.min(count, 32) do types[#types + 1] = typeof(args[i]) end
+            if count > 32 then types[#types + 1] = "additional_arguments_omitted" end
+            diagnosticEvent("remotes/observations.jsonl", {instanceId = id, robloxPath = path,
+                className = remote.ClassName, direction = direction, argumentTypes = types,
+                argumentCount = count, scriptId = scriptId, evidence = "cobalt_observed"})
+            local item = remoteIndex[id]
+            if not item then
+                item = {instanceId = id, name = readName(remote, cfg, state), robloxPath = path,
+                    className = remote.ClassName, service = service, evidence = "cobalt_observed",
+                    knownScriptLinks = {}, observedScriptLinks = {}}
+                remoteIndex[id] = item
+            end
+            if scriptId and not table.find(item.observedScriptLinks, scriptId) then
+                item.observedScriptLinks[#item.observedScriptLinks + 1] = scriptId
+                diagnostics.knownCallers = diagnostics.knownCallers + 1
+            end
+            diagnostics.remoteObservations = diagnostics.remoteObservations + 1
+            diagnostics.cobaltAttached = true
+        end
+        shared.LesbhubExporterObserveRemote = bridge
+    end
+
+    -- Subscribe before scanning, including before GUI/operator interactions.
+    -- Event records capture properties immediately; no task.spawn per event.
+    if cfg.continuous then attachListeners() end
+    local selected = 0
+    for _, service in ipairs(Exporter.TARGETS) do
+        if cfg.targets[service] then
+            selected = selected + 1
+            scan(service, 1)
+            if state.stopped then break end
+        end
+    end
+    if selected == 0 then partial("no_targets") end
+
+    if cfg.targets.Workspace then
+        local ok, streaming = pcall(function() return workspace.StreamingEnabled end)
+        if ok and streaming then partial("workspace_streaming_enabled") end
+    end
+
+    if not cfg.continuous and cfg.twoPassGui and not state.stopped
+        and (cfg.targets.PlayerGui or cfg.targets.StarterGui) then
+        for pass = 2, cfg.guiPasses do
+            notify(onProgress, "waiting_gui_pass", state, "PlayerGui")
+            local deadline = os.clock() + cfg.secondPassDelay
+            while os.clock() < deadline and not stopCheck() do task.wait(0.1) end
+            if state.stopped then break end
+            for _, service in ipairs({"PlayerGui", "StarterGui"}) do
+                if cfg.targets[service] then scan(service, pass) end
+                if state.stopped then break end
+            end
+            if state.stopped then break end
+        end
+    end
+
+    if cfg.continuous then processEvents(true) end
+    deep:saveIndex()
+    checkpoint()
+    deep:drain()
+
     if cfg.continuous and not state.stopped and selected > 0 then
         -- Event handlers capture transient additions/removals (including Workspace);
         -- periodic delta rescans catch changes to already-existing GUI text/visibility.
@@ -1300,6 +1742,7 @@ function Exporter.capture(options, onProgress, control)
                 if stopCheck() then break end
                 attachListeners()
                 processEvents()
+                deep:drain()
                 cyclePass = cyclePass + 1
                 state.monitorCycles = state.monitorCycles + 1
                 for _, service in ipairs({"PlayerGui", "StarterGui"}) do
@@ -1352,6 +1795,54 @@ function Exporter.capture(options, onProgress, control)
         notify(onProgress, "monitoring_stopped", state)
     end
 
+    deep:drain()
+    deep:saveIndex()
+    for _, connection in ipairs(diagnosticConnections) do pcall(function() connection:Disconnect() end) end
+    if bridge and shared.LesbhubExporterObserveRemote == bridge then shared.LesbhubExporterObserveRemote = nil end
+    flushDiagnostics()
+    local scriptSummary = deep:summary()
+    if not scriptSummary.indexWritten then partial("script_index_write_failed") end
+    if cfg.includeReconstructedCode then
+        local stats = scriptSummary.stats
+        if stats.failed + stats.partial + stats.empty + stats.inaccessible > 0 then
+            partial("script_extraction_incomplete")
+        end
+    end
+    local function ordered(index)
+        local rows = {}
+        for _, item in pairs(index) do rows[#rows + 1] = item end
+        table.sort(rows, function(a, b) return a.instanceId < b.instanceId end)
+        return rows
+    end
+    local function writeIndex(path, payload)
+        local ok = pcall(function()
+            assert(createFolders((base .. "/" .. path):match("^(.*)/[^/]+$")))
+            local encoded, text = pcall(function() return HttpService:JSONEncode(payload) end)
+            if not encoded then
+                text = HttpService:JSONEncode(portableJson(payload))
+                partial("index_serialization_recovered:" .. path)
+            end
+            writefile(base .. "/" .. path, text)
+        end)
+        if not ok then partial("index_write_failed:" .. path) end
+    end
+    writeIndex("remotes/index.json", {version = 1, evidence = "static_inventory", remotes = ordered(remoteIndex)})
+    writeIndex("gui/index.json", {version = 1, scope = "latest observed state; history is in chunks", elements = ordered(guiIndex)})
+    writeIndex("report.json", {version = 1, scriptExport = scriptSummary,
+        diagnostics = diagnostics, dataRecords = state.written, dataFiles = state.fileCount,
+        scriptIndex = "scripts/index.json", remoteIndex = "remotes/index.json", guiIndex = "gui/index.json"})
+    local report = {"# Deep Export " .. Exporter.VERSION, "", "Client-visible reconstructed pseudocode only.",
+        "", "Script index: scripts/index.json", "Remote index: remotes/index.json", "GUI index: gui/index.json",
+        "", "Discovered: " .. scriptSummary.stats.discovered,
+        "Succeeded: " .. scriptSummary.stats.succeeded, "Partial: " .. scriptSummary.stats.partial,
+        "Failed: " .. scriptSummary.stats.failed, "Inaccessible: " .. scriptSummary.stats.inaccessible,
+        "Empty: " .. scriptSummary.stats.empty, "", "## Failures and limitations"}
+    for _, entry in ipairs(deep.entries) do
+        if entry.status ~= "success" then
+            report[#report + 1] = entry.scriptId .. " | " .. entry.robloxPath .. " | " .. entry.status .. " | " .. entry.error
+        end
+    end
+    if not pcall(writefile, base .. "/report.md", table.concat(report, "\n") .. "\n") then partial("report_write_failed") end
     if state.errorCount > 0 then partial("read_or_write_errors") end
     local reasons = {}
     for reason in pairs(state.partialReasons) do table.insert(reasons, reason) end
@@ -1380,6 +1871,9 @@ function Exporter.capture(options, onProgress, control)
             monitorCycles = state.monitorCycles, deltaRecords = state.deltaRecords,
             added = state.added, updated = state.updated, removed = state.removed,
         },
+        scriptExport = scriptSummary,
+        diagnostics = diagnostics,
+        identity = {version = 1, scope = "capture_local", ordering = "sequence", lastSequence = nextSequence},
         services = state.services,
         categories = state.categories,
         layout = {version = cfg.organizedOutput and 2 or 1,
@@ -1388,6 +1882,8 @@ function Exporter.capture(options, onProgress, control)
         settings = {
             format = cfg.format, targets = cfg.targets, guiTexts = cfg.guiTexts,
             guiProperties = cfg.guiProperties, worldProperties = cfg.worldProperties,
+            includeReconstructedCode = cfg.includeReconstructedCode,
+            observeGuiActions = cfg.observeGuiActions, observeRemotes = cfg.observeRemotes,
             assets = cfg.assets, includeAttributes = cfg.includeAttributes,
             includeTags = cfg.includeTags, textboxValues = cfg.textboxValues,
             stringValues = cfg.stringValues, twoPassGui = cfg.twoPassGui,
@@ -1402,6 +1898,7 @@ function Exporter.capture(options, onProgress, control)
             redactsKnownPlayerNames = true,
             excludesChatGui = true,
             excludesScriptSource = true,
+            includesReconstructedCode = cfg.includeReconstructedCode,
             excludesTextboxValuesByDefault = true,
             includesSessionOrPrivateServerIds = false,
         },
@@ -1411,7 +1908,7 @@ function Exporter.capture(options, onProgress, control)
             "No global node, depth, total byte, or string-length limit is applied.",
             "GUI snapshots are not merged; lazy menus must be opened by the operator.",
             "Categorized output places data in category/service subfolders while preserving original paths.",
-            "The scripts category contains metadata only, not script sources.",
+            "Script metadata remains in chunks; opted-in reconstructed code is in scripts/sources with scripts/index.json.",
             "Native Archivable/Enabled/RunContext, attributes, tags and safe client-visible Instance references are collected when readable.",
             "RemoteInfo contains documented class capabilities only; not intercepted traffic, handlers, argument schemas or observed call direction.",
             "Continuous mode: pass 1 is a full snapshot; later records have operations add/update/remove.",
@@ -1428,6 +1925,130 @@ function Exporter.capture(options, onProgress, control)
     end
     notify(onProgress, "done", state, manifest.status)
     return {folder = base, manifest = manifest}
+end
+
+local captureRunning = false
+function Exporter.capture(options, onProgress, control)
+    if captureRunning then return nil, "a capture is already running" end
+    captureRunning = true
+    control = type(control) == "table" and control or {}
+    local ok, result, err = pcall(capture, options, onProgress, control)
+    if type(control._lesbhubCleanup) == "function" then pcall(control._lesbhubCleanup) end
+    control._lesbhubCleanup = nil
+    captureRunning = false
+    if not ok then return nil, tostring(result) end
+    return result, err
+end
+
+local function safeCaptureFolder(folder)
+    if type(folder) ~= "string" or folder:sub(1, 16) ~= "LesbhubExporter/"
+        or folder:find("[\\:%c]") or folder:find("//", 1, true) then return false end
+    for part in folder:gmatch("[^/]+") do if part == "." or part == ".." then return false end end
+    return true
+end
+
+function Exporter.search(folder, query)
+    if not safeCaptureFolder(folder) or type(readfile) ~= "function" then return nil, "capture is unavailable" end
+    query = tostring(query or ""):lower()
+    if query == "" then return {}, "" end
+    local matches = {}
+    for _, item in ipairs({{"scripts/index.json", "scripts"}, {"remotes/index.json", "remotes"}, {"gui/index.json", "elements"}}) do
+        local ok, index = pcall(function() return HttpService:JSONDecode(readfile(folder .. "/" .. item[1])) end)
+        if ok and type(index) == "table" then
+            for _, row in ipairs(index[item[2]] or {}) do
+                local text = tostring(row.name or "") .. " " .. tostring(row.robloxPath or "")
+                    .. " " .. tostring(row.latestObservedPath or "")
+                if text:lower():find(query, 1, true) then
+                    matches[#matches + 1] = {kind = item[2], name = row.name, robloxPath = row.robloxPath,
+                        outputPath = row.outputPath, scriptId = row.scriptId, status = row.status}
+                    if #matches >= 50 then return matches, "first 50 matches" end
+                end
+            end
+        end
+    end
+    return matches, ""
+end
+
+function Exporter.resumeScripts(folder, onProgress, control)
+    if not safeCaptureFolder(folder) or type(readfile) ~= "function" then return nil, "unsafe/unavailable capture" end
+    local ok, manifest, index = pcall(function()
+        return HttpService:JSONDecode(readfile(folder .. "/manifest.json")),
+            HttpService:JSONDecode(readfile(folder .. "/scripts/index.json"))
+    end)
+    if not ok or type(manifest) ~= "table" or type(index) ~= "table" then return nil, "unreadable capture/index" end
+    if not manifest.scriptExport or manifest.scriptExport.runtimeToken ~= DeepScripts.runtimeToken
+        or manifest.game.placeId ~= game.PlaceId or manifest.game.gameId ~= game.GameId then
+        return nil, "resume requires the original Roblox/executor session; instance identities cannot be guessed"
+    end
+    local progressOk, progress = pcall(readfile, folder .. "/scripts/progress.jsonl")
+    if progressOk then
+        local byId = {}
+        for i, entry in ipairs(index.scripts) do byId[entry.scriptId] = i end
+        for line in progress:gmatch("[^\r\n]+") do
+            local decoded, entry = pcall(function() return HttpService:JSONDecode(line) end)
+            if decoded and type(entry) == "table" and byId[entry.scriptId] then
+                index.scripts[byId[entry.scriptId]] = entry
+            end
+        end
+    end
+    local candidates = {}
+    for service, selected in pairs(manifest.settings.targets) do
+        local root = selected and table.find(Exporter.TARGETS, service) and rootInstance(service)
+        if root then
+            local stack = {root}
+            local steps = 0
+            while #stack > 0 do
+                if control and control.cancelled then return nil, "cancelled" end
+                local obj = table.remove(stack)
+                if obj.ClassName == "LocalScript" or obj.ClassName == "ModuleScript" or obj.ClassName == "Script" then
+                    local readable, id = pcall(function() return obj:GetDebugId() end)
+                    if readable then candidates[id] = obj end
+                end
+                local childrenOk, children = pcall(function() return obj:GetChildren() end)
+                if childrenOk then for _, child in ipairs(children) do stack[#stack + 1] = child end end
+                steps = steps + 1
+                if steps % 100 == 0 then task.wait() end
+            end
+        end
+    end
+    local deep = DeepScripts.new(folder, true, control, onProgress)
+    local resumed, resumeError = pcall(function() deep:resume(index.scripts, function(entry)
+        local instance = candidates[entry.debugId]
+        return instance and instance.ClassName == entry.className and instance or nil
+    end) end)
+    if not resumed then return nil, "could not resume scripts: " .. tostring(resumeError) end
+    manifest.scriptExport = deep:summary()
+    manifest.scriptExport.resumed = true
+    manifest.settings.includeReconstructedCode = true
+    manifest.privacy = manifest.privacy or {}
+    manifest.privacy.includesReconstructedCode = true
+    local scripts = manifest.scriptExport.stats
+    local incomplete = scripts.failed + scripts.partial + scripts.empty + scripts.inaccessible > 0
+    local reasons = {}
+    for _, reason in ipairs(manifest.partialReasons) do
+        if reason ~= "script_extraction_incomplete" then reasons[#reasons + 1] = reason end
+    end
+    if incomplete then reasons[#reasons + 1] = "script_extraction_incomplete" end
+    manifest.partialReasons = reasons
+    if manifest.status == "complete" or manifest.status == "partial" then
+        manifest.status = #reasons > 0 and "partial" or "complete"
+    end
+    local reportOk, report = pcall(function() return HttpService:JSONDecode(readfile(folder .. "/report.json")) end)
+    if reportOk and type(report) == "table" then
+        report.scriptExport = manifest.scriptExport
+        pcall(function() writefile(folder .. "/report.json", HttpService:JSONEncode(report)) end)
+    end
+    local reportLines = {"# Deep Export " .. Exporter.VERSION .. " (script extraction resumed)", "",
+        "The structural snapshots were not recaptured.", "", "Script index: scripts/index.json", "",
+        "Succeeded: " .. scripts.succeeded, "Partial: " .. scripts.partial,
+        "Failed: " .. scripts.failed, "Inaccessible: " .. scripts.inaccessible, "Empty: " .. scripts.empty}
+    for _, entry in ipairs(deep.entries) do
+        if entry.status ~= "success" then reportLines[#reportLines + 1] = entry.scriptId .. " | " .. entry.error end
+    end
+    pcall(writefile, folder .. "/report.md", table.concat(reportLines, "\n") .. "\n")
+    local saved = pcall(function() writefile(folder .. "/manifest.json", HttpService:JSONEncode(manifest)) end)
+    if not saved then return nil, "could not update resumed manifest" end
+    return {folder = folder, manifest = manifest}
 end
 
 -- Optional native place export, only after an explicit UI action.
@@ -1456,17 +2077,17 @@ local LANGUAGE_FILE = "LesbhubExporter/language.txt"
 local PRESETS = {
     max = {guiTexts = true, guiProperties = true, worldProperties = true, assets = true,
         textboxValues = true, stringValues = true,
-        includeAttributes = true, includeTags = true, twoPassGui = true,
+        includeAttributes = true, includeTags = true, includeReconstructedCode = true, twoPassGui = true,
         guiPasses = 4, secondPassDelay = 7, continuousInterval = 3,
         yieldEvery = 45, chunkSize = 200},
     smart = {guiTexts = true, guiProperties = true, worldProperties = true, assets = true,
         textboxValues = true, stringValues = true,
-        includeAttributes = true, includeTags = true, twoPassGui = true,
+        includeAttributes = true, includeTags = true, includeReconstructedCode = true, twoPassGui = true,
         guiPasses = 3, secondPassDelay = 6, continuousInterval = 4,
         yieldEvery = 80, chunkSize = 300},
     fast = {guiTexts = true, guiProperties = false, worldProperties = false, assets = true,
         textboxValues = true, stringValues = true,
-        includeAttributes = true, includeTags = true, twoPassGui = true,
+        includeAttributes = true, includeTags = true, includeReconstructedCode = true, twoPassGui = true,
         guiPasses = 2, secondPassDelay = 3, continuousInterval = 6,
         yieldEvery = 140, chunkSize = 500},
 }
@@ -1474,6 +2095,24 @@ local PRESETS = {
 -- All visible strings are routed through this dictionary. Names of Roblox
 -- services, export fields and file paths are deliberately never translated.
 local WORDS = {
+    deep_code = {"Include reconstructed client script code", "Inclure le code reconstruit des scripts clients"},
+    deep_code_desc = {"Enabled by default: writes verified .luau files and a script index; disable for metadata-only exports.",
+        "Activé par défaut : écrit les fichiers .luau et un index ; désactivable pour exporter seulement les métadonnées."},
+    deep_code_notice = {"Reconstructed client scripts (.luau) will be saved locally if supported. They may differ from original sources.",
+        "Les scripts clients reconstruits (.luau) seront enregistrés localement si disponibles. Ils peuvent différer des sources originales."},
+    deep_result = {"Reconstructed scripts: %d saved, %d partial, %d failed/inaccessible. Index: %s",
+        "Scripts reconstruits : %d sauvés, %d partiels, %d échoués/inaccessibles. Index : %s"},
+    copy_report = {"Copy latest export report", "Copier le dernier rapport d'export"},
+    search_index = {"Search latest scripts / remotes / GUI", "Rechercher dans les scripts / remotes / GUI"},
+    search_index_desc = {"Type a name or path; matches are written to the activity journal.",
+        "Saisir un nom ou chemin ; les résultats apparaissent dans le journal."},
+    search_button = {"Search indexes", "Rechercher dans les index"},
+    gui_actions = {"Observe GUI activations", "Observer les activations GUI"},
+    gui_actions_desc = {"Record operator button activations during capture; never clicks automatically.",
+        "Enregistrer les activations de boutons pendant la capture ; aucun clic automatique."},
+    remote_observation = {"Accept optional Cobalt observations", "Accepter les observations Cobalt optionnelles"},
+    remote_observation_desc = {"Requires the separately enabled observer plugin. Captures types, never argument values.",
+        "Nécessite le plugin d'observation activé séparément. Types uniquement, sans valeurs d'arguments."},
     home = {"Home", "Accueil"}, dataset = {"Dataset", "Données"},
     targets = {"Targets", "Cibles"}, options = {"Options", "Options"},
     capture = {"Capture", "Capture"}, map = {"Map", "Carte"},
@@ -1510,8 +2149,8 @@ local WORDS = {
     home_no_capture = {"No capture yet", "Aucune capture effectuée"},
     quick_actions = {"Quick actions", "Raccourcis"},
     full = {"Full export + GUI", "Export complet + GUI"},
-    full_desc = {"All selected structures and guided menu snapshots in one operation.",
-        "Toutes les structures sélectionnées et les menus GUI en une seule opération."},
+    full_desc = {"Structures, GUI snapshots and reconstructed Luau scripts in one operation.",
+        "Structures, captures GUI et scripts Luau reconstruits en une seule opération."},
     quick_gui = {"Capture GUI now", "Capturer la GUI maintenant"},
     quick_gui_desc = {"Take an extra snapshot after manually opening a menu.",
         "Prends une capture supplémentaire après avoir ouvert un menu."},
@@ -1531,8 +2170,8 @@ local WORDS = {
     output_layout = {"File organization", "Organisation des fichiers"},
     layout_categorized = {"Categorized folders", "Dossiers classés par type"},
     layout_flat = {"Flat (legacy)", "À plat (ancien format)"},
-    layout_desc = {"Groups instances by type and Roblox service. Script records are metadata only.",
-        "Classe les objets par type puis par service Roblox. Les scripts restent des métadonnées, sans code source."},
+    layout_desc = {"Groups metadata by type and service. Reconstructed code is included by default.",
+        "Classe les métadonnées par type et service. Le code reconstruit est inclus par défaut."},
     target_intro = {"Roblox services", "Services Roblox"},
     target_desc = {"All available targets are selected by default. Search and select several in one menu.",
         "Toutes les cibles sont sélectionnées par défaut. Recherche et sélectionne plusieurs services dans un seul menu."},
@@ -1588,8 +2227,8 @@ local WORDS = {
     unlimited_desc = {"Chunking controls file sizes only; the overall dataset is not capped.",
         "Le découpage limite les fichiers individuels, jamais le volume total exporté."},
     capture_intro = {"One-click capture", "Capture en un clic"},
-    capture_desc = {"Choose a one-time full export or continuous monitoring. The activity window opens for every mode.",
-        "Choisis un export complet ponctuel ou une surveillance continue. Le journal s'ouvre dans chaque mode."},
+    capture_desc = {"Full export includes GUI and reconstructed Luau scripts by default. Continuous monitoring is also available.",
+        "L'export complet inclut les GUI et les scripts Luau reconstruits par défaut. La surveillance continue reste disponible."},
     ready = {"Ready", "Prêt"},
     ready_desc = {"The exact object total is not known before the scan.", "Le nombre final d'objets est inconnu avant le scan."},
     last_export = {"Last export", "Dernier export"},
@@ -1944,9 +2583,11 @@ function UI.open(Engine, restore)
     if config.organizedOutput == nil then config.organizedOutput = true end
     if config.includeAttributes == nil then config.includeAttributes = true end
     if config.includeTags == nil then config.includeTags = true end
+    if config.includeReconstructedCode == nil then config.includeReconstructedCode = true end
     local presetKey = restore.preset or "max"
     local running, control, destroyed, nativeBusy = false, nil, false, false
     local runningMode = nil
+    local latestFolder, searchQuery = nil, ""
 
     local Window = windui:CreateWindow({
         Title = "Lesbhub Exporter", Folder = "lesbhub-exporter", Icon = "database",
@@ -2140,6 +2781,9 @@ function UI.open(Engine, restore)
     addToggle("assets", "assets", "assets_desc")
     addToggle("includeAttributes", "attributes", "attributes_desc")
     addToggle("includeTags", "tags", "tags_desc")
+    addToggle("includeReconstructedCode", "deep_code", "deep_code_desc")
+    addToggle("observeGuiActions", "gui_actions", "gui_actions_desc")
+    addToggle("observeRemotes", "remote_observation", "remote_observation_desc")
     addToggle("textboxValues", "textbox", "textbox_desc")
     addToggle("stringValues", "stringvalue", "stringvalue_desc")
     addToggle("twoPassGui", "gui_passes_enabled", "gui_passes_desc")
@@ -2170,6 +2814,22 @@ function UI.open(Engine, restore)
     capture:Paragraph({Title = t("action_group"), Desc = t("continuous_help")})
     local captureStatus = capture:Paragraph({Title = t("ready"), Desc = t("ready_desc")})
     captureSummary = capture:Paragraph({Title = t("last_export"), Desc = t("no_export")})
+    capture:Input({Title = t("search_index"), Desc = t("search_index_desc"), Value = "",
+        Callback = function(value) searchQuery = tostring(value) end})
+    capture:Button({Title = t("search_button"), Icon = "search", Callback = function()
+        if not latestFolder or running then return end
+        local matches, reason = Engine.search(latestFolder, searchQuery)
+        local lines = {reason or ""}
+        for _, row in ipairs(matches or {}) do
+            lines[#lines + 1] = row.kind .. " | " .. row.robloxPath .. " | " .. (row.outputPath or row.status or "")
+        end
+        journal.setText(table.concat(lines, "\n")); journal.show()
+    end})
+    capture:Button({Title = t("copy_report"), Icon = "copy", Callback = function()
+        if not latestFolder or type(readfile) ~= "function" then return end
+        local ok, text = pcall(readfile, latestFolder .. "/report.md")
+        if ok and type(setclipboard) == "function" then pcall(setclipboard, text) end
+    end})
     capture:Button({
         Title = t("full"), Icon = "download",
         Color = Color3.fromRGB(48, 109, 204), Size = "Large",
@@ -2404,6 +3064,7 @@ function UI.open(Engine, restore)
                 alert(t("export_failed"), reason)
             else
                 local manifest = result.manifest
+                latestFolder = result.folder
                 local statusLabel = t(manifest.status == "complete" and "completed"
                     or manifest.status == "stopped" and "stopped"
                     or manifest.status == "cancelled" and "cancelled_status" or "partial")
@@ -2413,6 +3074,12 @@ function UI.open(Engine, restore)
                 if manifest.settings and manifest.settings.continuous then
                     summary = summary .. "  |  " .. t("monitor_deltas") .. ": "
                         .. shortCount(manifest.stats.deltaRecords or 0)
+                end
+                if manifest.scriptExport and manifest.scriptExport.enabled then
+                    local scripts = manifest.scriptExport.stats
+                    summary = summary .. "\n" .. tf("deep_result", scripts.succeeded,
+                        scripts.partial, scripts.failed + scripts.inaccessible + scripts.empty,
+                        result.folder .. "/scripts/index.json")
                 end
                 event(tf("event_end", summary))
                 if type(manifest.partialReasons) == "table" and #manifest.partialReasons > 0 then
@@ -2443,6 +3110,7 @@ function UI.open(Engine, restore)
             Title = t("confirm_export") .. " • " .. kind, Width = 390,
             Content = t("data_local") .. "\n\n"
                 .. ((config.textboxValues or config.stringValues) and t("data_risk") or t("data_safer"))
+                .. (config.includeReconstructedCode and ("\n\n" .. t("deep_code_notice")) or "")
                 .. "\n\n" .. (mode == "continuous" and (t("continuous_consent") .. "\n\n") or "")
                 .. t("do_not_publish") .. "\n\n" .. t("no_upload"),
             Buttons = {

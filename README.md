@@ -1,12 +1,12 @@
 # Lesbhub Exporter
 
-A public, read-only **Roblox client structure exporter** built for collecting datasets, comparing experiences and studying stable client-visible object structures. **V1 exports data only. There is no game detector.**
+A public, read-only **Roblox client structure and reconstructed-code exporter** built for collecting datasets, comparing experiences and studying stable client-visible object structures. **Deep Export v0.7 writes reconstructed client Luau and GUI snapshots locally by default. There is no game detector.**
 
 The UI is built with our [Lesbhub WindUI fork](https://github.com/kyaemma/lesbhub-ui). The capture engine is separate and can be tested independently.
 
 ## Status
 
-**v0.6.0: expanded client metadata plus optional Cobalt remote observation.** Earlier Potassium captures have demonstrated large exports; the most recent screenshots show 223.7K objects, 44.7K asset references and a 60.3-second run (partial status, reason not yet confirmed from its manifest). This UI update is validated with Luau and Python automated tests, including a simulated floating journal. A visual Potassium retest is still needed.
+**v0.7.0: Deep Export.** **Full export + GUI** now saves real `.luau` files by default, alongside GUI snapshots with verified readback, checksums and a searchable index. A live Potassium full-client trial saved **669 syntactically valid files from 940 discovered script objects**, with 271 empty results reported separately. This does not recover server-only source or guarantee original-code equivalence. See [live evidence and limitations](docs/deep-export-validation.md).
 
 ## Run from a supported Roblox client environment
 
@@ -23,7 +23,8 @@ For offline/manual distribution, use `dist/lesbhub-exporter.lua` (but the UI sti
 - **Targets:** ReplicatedStorage, ReplicatedFirst, StarterGui, PlayerGui, StarterPlayer, PlayerScripts, StarterPack, Workspace, Lighting, SoundService, Teams.
 - **Targets:** multi-select searchable dropdown, with **all services selected by default**, plus one-click presets for all, GUI-only and game structures.
 - **Properties:** names, classes, hierarchy, GUI labels/layout, geometry, assets, constrained/typed values, Instance references when safely addressable, and additional joint/camera/light metadata.
-- **Scripts and remotes:** script `Archivable`/`Enabled`/`RunContext` when readable; remotes include `Archivable` and a static `RemoteInfo` class-capability descriptor, plus attributes/tags where available. This is not decompiled code or intercepted traffic.
+- **Reconstructed code:** enabled by default (disable in Advanced for metadata-only exports), protected `decompile(instance)`, one intelligibly named `.luau` per accessible script, progressive local writes, exact readback, syntax checks, SHA-256 (or identified Adler-32 fallback), durable progress and per-script errors. Recovered code is never executed or required.
+- **Scripts and remotes:** script `Archivable`/`Enabled`/`RunContext` when readable; remotes include `Archivable` and a static `RemoteInfo` class-capability descriptor, plus attributes/tags where available. These static metadata fields are separate from default reconstructed code and optional Cobalt traffic.
 - **Optional Cobalt plugin:** original, separately installed [passive remote observer](docs/cobalt-integration.md) using [upio/Cobalt](https://gitlab.com/upio/cobalt)'s documented plugin API. It records outgoing/incoming call counts and top-level argument **types**, not raw argument values.
 - **Formats:** chunked JSON, JSONL or CSV; one **manifest.json** per capture, with settings, counts, status, errors, partial reasons, and category totals.
 - **Organized datasets:** by default, records are grouped by type (`gui`, `scripts`, `remotes`, `world`, `values`, `assets`, `structures`, `other`) and by Roblox service. UI scripts live under `scripts/PlayerGui/`, while UI widgets go under `gui/PlayerGui/`. Full original paths and parent relationships are preserved. The legacy flat layout remains selectable in Dataset.
@@ -34,7 +35,7 @@ For offline/manual distribution, use `dist/lesbhub-exporter.lua` (but the UI sti
 - **Map tab:** JSON geometry export (Workspace/Lighting/SoundService, BasePart position/CFrame/size, Model world pivot, materials and asset references). Optional separate native `saveinstance()` command like Infinite Yield, only after explicit opt-in and only if the executor supports it.
 - **Fault tolerance:** JSON serialization errors are isolated to the offending records. Recovery keeps traversing and records a `partial` manifest status instead of aborting a whole service.
 - **Performance:** iterative depth-first traversal, periodic `task.wait()`, small chunk files, cancellation and no global depth/object/total-byte/string-length cap.
-- **Privacy:** skips other players' characters, chat GUI, `CoreGui` and script source. All UI presets **enable** TextBox.Text and StringValue.Value for local research; every capture requires acknowledging a private-data warning. Redaction of known player names and common token patterns remains best-effort.
+- **Privacy:** skips other players' characters, chat GUI, `CoreGui` and original `Script.Source`. Reconstructed code is enabled by default, preserved without content redaction, and must stay private. All UI presets **enable** TextBox.Text and StringValue.Value for local research; every capture requires acknowledging a private-data warning. Redaction of known player names and common token patterns remains best-effort.
 
 ## WindUI interface (v0.5.2)
 
@@ -60,7 +61,7 @@ LesbhubExporter/<category>/<game>/<variant>/<capture-id>/
   structures/ReplicatedStorage/p1-0001.json
 ```
 
-Each object is stored in **one** type category; `path` and `parentPath` still reference the original Roblox hierarchy, not the filesystem. Not every category exists in every game. The `scripts` folder contains only script object metadata and **does not export script sources**. The `assets` folder contains asset-bearing instances, not downloaded image/sound binaries. The `manifest.json` contains the per-category and per-service record/file counts. On v0.6+, most script and remote records also contain safe metadata instead of an empty `properties` object.
+Each object is stored in **one** type category; `path` and `parentPath` still reference the original Roblox hierarchy, not the filesystem. Not every category exists in every game. Script metadata chunks remain under `scripts/<service>/`; reconstructed code is written by default under `scripts/sources/<service>/`, with `scripts/index.json` and `report.md`. Original `Script.Source` is never read. The `assets` folder contains asset-bearing instances, not downloaded image/sound binaries. The `manifest.json` contains the per-category and per-service record/file counts. On v0.6+, most script and remote records also contain safe metadata instead of an empty `properties` object.
 
 This layout works with full scans, guided GUI passes and continuous `add/update/remove` deltas. To validate old or new exports: `python scripts/validate_export.py <run-directory>`.
 
@@ -99,7 +100,7 @@ The **activity window** is an independently draggable, non-modal panel attached 
 
 Settings also has a configurable show/hide keybind (initially **RightShift**), Hide and **Unload GUI**. Unload destroys both the main UI and floating window, disconnects UI listeners and requests cancellation of a running capture. The written files remain on disk.
 
-**Native place backup:** Only the separate optional `saveinstance()` action invokes executor-native place saving. The executor may display `Decompiling scripts...`; the normal JSON exporter never decompiles scripts.
+**Native place backup:** Only the separate optional `saveinstance()` action invokes executor-native place saving. The executor may display `Decompiling scripts...`; the standard capture also reconstructs accessible client code when its separate opt-in is enabled.
 
 ### Output directory
 
@@ -127,12 +128,13 @@ The timestamp and clock suffix are **run identifiers**, not signature material. 
 1. Start a Roblox session and launch the exporter. Enter a game label, category and variant.
 2. Select target services, output format, and **Categorized folders** (recommended) or **Flat (legacy)** in Dataset. Use GUI-only for targeted interface studies or full client for broad structural comparisons.
 3. In **Options**, choose **Max information**, **Smart** or **Fast**. Use **Advanced** only if you want to customize details. **Full export + GUI** includes guided GUI snapshots. You can open any in-game menu during capture; no special interface is assumed. For longer exploration, choose **Start continuous capture**, then press **Stop & Save** when finished.
-4. Read and accept the **local-data privacy confirmation** before the capture starts. Then review the `manifest.json` (especially `status`, `partialReasons` and counts), and validate the directory:
+4. Luau code extraction is enabled already; disable **Include reconstructed client script code** in Options → Advanced only for metadata-only exports. Inspect `scripts/index.json`, `scripts/sources/` and `report.md`; use Capture search and Copy latest export report for navigation.
+5. Read and accept the **local-data privacy confirmation** before the capture starts. Then review the `manifest.json` (especially `status`, `partialReasons` and counts), and validate the directory:
    ```powershell
    python scripts/validate_export.py "C:\path\to\LesbhubExporter\criminality\criminality\variant-a\run-folder"
    ```
-5. For map geometry, open the **Map** tab and choose **Export map as JSON**. If `saveinstance()` exists, an optional **Save native Roblox place** button delegates to the executor; it may export more than the JSON allowlist, including scripts. Never publish an unreviewed native export.
-6. Review text manually **before sharing**. The automatic redaction layer cannot guarantee removal of all personal or sensitive information.
+6. For map geometry, open the **Map** tab and choose **Export map as JSON**. If `saveinstance()` exists, an optional **Save native Roblox place** button delegates to the executor; it may export more than the JSON allowlist, including scripts. Never publish an unreviewed native export.
+7. Review text manually **before sharing**. The automatic redaction layer cannot guarantee removal of all personal or sensitive information.
 
 ## Development
 
@@ -151,7 +153,7 @@ To connect an **already existing empty Windows folder** `C:\dev\Lesbhub\lesbhub-
 ## Limitations / security
 
 - Roblox replication and StreamingEnabled determine visibility. ServerScriptService, ServerStorage, server-only scripts and private server state cannot be exported from the client.
-- Script metadata can be listed; **no Source, bytecode, decompilation or privileged executor APIs are collected**.
+- Original `Script.Source` and bytecode are never collected. The default-on pipeline uses the documented executor `decompile` function to obtain reconstructed pseudocode. Missing APIs, empty results, syntax failures, detected truncation and file failures are reported explicitly.
 - A scan is a **snapshot**. Not all dynamically created GUI will exist at capture time. Additional GUI passes can capture menus opened by the operator. Hidden but already-instantiated objects are exported even when `Visible = false`.
 - Paths may contain unstable per-session indexes; direct PlaceId/GameId and player-dependent details should **not** become detection signatures.
 - All **UI presets** enable `StringValue.Value` and `TextBox.Text` by default at the user's request; the headless engine still defaults them off. Review private exports before reuse.
@@ -165,3 +167,13 @@ To connect an **already existing empty Windows folder** `C:\dev\Lesbhub\lesbhub-
 The `reference/` folder contains **Git submodules** (pinned upstream revisions), not vendored source, so licenses and provenance remain clear. See [reference/README.md](reference/README.md).
 
 MIT License. See [LICENSE](LICENSE).
+
+
+## Deep Export v0.7
+
+- [Output contract and migration](docs/deep-export.md): v0.5/v0.6 compatibility, code/index integrity, resume, identity and ordering.
+- [Live validation](docs/deep-export-validation.md): three-script proof, full-client extraction, controlled local continuous fixture, performance and unverified cases.
+- `scripts/probe_decompile.luau` is a development probe for three existing client scripts. It is not required by the shipped exporter.
+- `scripts/probe_continuous.luau` creates and removes only its own client-local fixture. It does not activate existing game buttons or invoke a server remote.
+
+The shipped bundle performs discovery, reconstruction and file writes autonomously. MCP is used only during development. Keep generated captures outside this public repository.

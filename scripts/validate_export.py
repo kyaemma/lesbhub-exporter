@@ -9,6 +9,9 @@ from collections import defaultdict
 from pathlib import Path
 import re
 import sys
+import hashlib
+import zlib
+from pathlib import PurePosixPath, PureWindowsPath
 
 FLAT_RE = re.compile(r"^([A-Za-z][A-Za-z0-9]*)-p([1-9][0-9]*)-([0-9]{4,})\.(json|jsonl|csv)$")
 NESTED_RE = re.compile(r"^p([1-9][0-9]*)-([0-9]{4,})\.(json|jsonl|csv)$")
@@ -46,18 +49,24 @@ def parse_chunk(path: Path, service: str, capture_pass: int,
         with path.open("r", encoding="utf-8", newline="") as stream:
             reader = csv.DictReader(stream)
             header = ["path", "parentPath", "name", "className", "depth", "properties_json"]
-            if reader.fieldnames != header:
+            extended = header + ["instanceId", "parentInstanceId", "sequence", "scriptId", "operation", "observedAtUtc"]
+            if reader.fieldnames not in (header, extended):
                 issues.append(f"{path}: invalid CSV header")
                 return []
             records = []
             for row in reader:
                 try:
-                    records.append({
+                    record = {
                         "path": row["path"], "parentPath": row["parentPath"],
                         "name": row["name"], "className": row["className"],
                         "depth": int(row["depth"]),
                         "properties": json.loads(row["properties_json"]),
-                    })
+                    }
+                    for field in ("instanceId", "parentInstanceId", "sequence"):
+                        if row.get(field): record[field] = int(row[field])
+                    for field in ("scriptId", "operation", "observedAtUtc"):
+                        if row.get(field): record[field] = row[field]
+                    records.append(record)
                 except (TypeError, ValueError, KeyError, json.JSONDecodeError) as exc:
                     issues.append(f"{path}: invalid CSV record ({exc})")
             return records
@@ -83,6 +92,103 @@ def parse_location(relative: Path, version: int):
         return None
     service, capture_pass, index, fmt = match.groups()
     return service, int(capture_pass), int(index), fmt, None
+
+
+def validate_deep(folder: Path, manifest: dict, issues: list[str]) -> None:
+    """Validate optional v0.7 sidecars without changing historical chunk totals."""
+    summary = manifest.get("scriptExport")
+    if not isinstance(summary, dict):
+        return
+    index_path = folder / "scripts" / "index.json"
+    try:
+        index = json.loads(index_path.read_text(encoding="utf-8"))
+        entries = index["scripts"]
+        if entries == {}:  # Roblox's empty table encoding is executor-dependent.
+            entries = []
+        if not isinstance(entries, list):
+            raise ValueError("scripts must be an array")
+    except (OSError, ValueError, KeyError, TypeError) as exc:
+        issues.append(f"scripts/index.json: {exc}")
+        return
+    counts = dict(discovered=len(entries), attempted=0, succeeded=0, failed=0,
+                  inaccessible=0, empty=0, partial=0, skipped=0, pending=0,
+                  files=0, bytes=0)
+    ids, outputs = set(), set()
+    def digest(data, algorithm):
+        if algorithm == "sha256":
+            return hashlib.sha256(data).hexdigest()
+        if algorithm == "adler32":
+            return f"{zlib.adler32(data) & 0xffffffff:08x}"
+        raise ValueError("unsupported checksum algorithm")
+    for n, entry in enumerate(entries, 1):
+        label = f"scripts/index.json entry {n}"
+        if not isinstance(entry, dict):
+            issues.append(f"{label}: must be an object"); continue
+        required = {"scriptId", "className", "robloxPath", "outputPath", "status", "error",
+                    "byteLength", "lineCount", "checksum", "method"}
+        if not required.issubset(entry):
+            issues.append(f"{label}: missing required script fields"); continue
+        script_id = entry["scriptId"]
+        if not isinstance(script_id, str) or script_id in ids:
+            issues.append(f"{label}: invalid/duplicate scriptId")
+        else:
+            ids.add(script_id)
+        status = entry["status"]
+        if not isinstance(status, str) or status not in {"success", "failed", "inaccessible", "empty", "partial"}:
+            issues.append(f"{label}: invalid final status"); continue
+        counts["succeeded" if status == "success" else status] += 1
+        counts["attempted"] += bool(entry.get("attempted"))
+        counts["skipped"] += bool(entry.get("skipped"))
+        output = entry["outputPath"]
+        if not output:
+            if status in {"success", "partial"}:
+                issues.append(f"{label}: saved code requires outputPath")
+            continue
+        if not isinstance(output, str) or not output.startswith("scripts/sources/") or "\\" in output:
+            issues.append(f"{label}: unsafe outputPath"); continue
+        parts = PurePosixPath(output).parts
+        if (PureWindowsPath(output).drive or ".." in parts or ":" in output
+                or any(c in output for c in '<>"|?*') or any(ord(c) < 32 for c in output)
+                or not output.endswith(".luau")
+                or not (folder / output).resolve().is_relative_to(folder.resolve())):
+            issues.append(f"{label}: unsafe outputPath"); continue
+        if output.casefold() in outputs:
+            issues.append(f"{label}: duplicate outputPath")
+        outputs.add(output.casefold())
+        file = folder / output
+        if status in {"success", "partial"} and not file.is_file():
+            issues.append(f"{label}: missing .luau file"); continue
+        if not entry.get("verifiedReadback"):
+            if status in {"success", "partial"}:
+                issues.append(f"{label}: saved code has no verified readback")
+            continue
+        try:
+            content = file.read_bytes()
+            offset = entry["headerByteLength"]
+            if not isinstance(offset, int) or not 0 <= offset <= len(content):
+                raise ValueError("invalid headerByteLength")
+            source = content[offset:]
+            if len(source) != entry["byteLength"] or len(content) != entry["fileByteLength"]:
+                raise ValueError("byte length mismatch")
+            if source.count(b"\n") + 1 != entry["lineCount"]:
+                raise ValueError("line count mismatch")
+            if digest(source, entry["checksumAlgorithm"]) != entry["checksum"]:
+                raise ValueError("source checksum mismatch")
+            if digest(content, entry["fileChecksumAlgorithm"]) != entry["fileChecksum"]:
+                raise ValueError("file checksum mismatch")
+            if status == "success":
+                source.decode("utf-8")
+                if entry.get("truncationDetected") or entry.get("compiles") is not True:
+                    raise ValueError("success requires syntax validation and no detected truncation")
+            counts["files"] += 1; counts["bytes"] += len(content)
+        except (OSError, ValueError, KeyError, TypeError) as exc:
+            issues.append(f"{label}: {exc}")
+    for stats_name, stats in (("index", index.get("stats")), ("manifest", summary.get("stats"))):
+        if not isinstance(stats, dict) or any(stats.get(k) != v for k, v in counts.items()):
+            issues.append(f"scriptExport {stats_name} counters differ from script index/files")
+    for file in folder.rglob("*.luau"):
+        if file.relative_to(folder).as_posix().casefold() not in outputs:
+            issues.append(f"{file.relative_to(folder)}: unindexed .luau file")
 
 
 def validate_folder(folder: Path) -> list[str]:
@@ -128,10 +234,39 @@ def validate_folder(folder: Path) -> list[str]:
         issues.append("settings.organizedOutput disagrees with layout")
 
     chunk_files: list[tuple[Path, tuple]] = []
+    seen_sequences = set()
+    identity_enabled = isinstance(manifest.get("identity"), dict) and manifest["identity"].get("version") == 1
+    def check_sequence(row, location):
+        seq = row.get("sequence")
+        if not isinstance(seq, int) or isinstance(seq, bool) or seq < 1:
+            issues.append(f"{location}: invalid sequence")
+        elif seq in seen_sequences:
+            issues.append(f"{location}: duplicate global sequence")
+        else:
+            seen_sequences.add(seq)
+    sidecars = {"scripts/index.json", "remotes/index.json", "gui/index.json",
+                "gui/actions.jsonl", "remotes/observations.jsonl", "report.json",
+                "scripts/progress.jsonl", "performance-local.json"}
     for file in folder.rglob("*"):
         if not file.is_file() or file == manifest_path:
             continue
         if file.suffix not in {".json", ".jsonl", ".csv"}:
+            continue
+        if "scriptExport" in manifest and file.relative_to(folder).as_posix() in sidecars:
+            try:
+                if file.suffix == ".json":
+                    json.loads(file.read_text(encoding="utf-8"))
+                else:
+                    for line in file.read_text(encoding="utf-8").splitlines():
+                        if line.strip():
+                            row = json.loads(line)
+                            if identity_enabled and file.relative_to(folder).as_posix() in {
+                                "gui/actions.jsonl", "remotes/observations.jsonl"
+                            }:
+                                if isinstance(row, dict): check_sequence(row, str(file.relative_to(folder)))
+                                else: issues.append(f"{file}: invalid diagnostic event")
+            except (OSError, ValueError) as exc:
+                issues.append(f"{file.relative_to(folder)}: invalid sidecar: {exc}")
             continue
         position = parse_location(file.relative_to(folder), version)
         if position is None:
@@ -170,6 +305,10 @@ def validate_folder(folder: Path) -> list[str]:
             if not isinstance(record, dict) or not REQUIRED_RECORD.issubset(record):
                 issues.append(f"{prefix}: missing required fields")
                 continue
+            if identity_enabled:
+                check_sequence(record, prefix)
+                if not isinstance(record.get("instanceId"), int) or record["instanceId"] < 1:
+                    issues.append(f"{prefix}: invalid instanceId")
             if not isinstance(record["depth"], int) or record["depth"] < 0:
                 issues.append(f"{prefix}: invalid depth")
             if not isinstance(record["properties"], dict):
@@ -234,6 +373,7 @@ def validate_folder(folder: Path) -> list[str]:
         issues.append("stats.bytes differs from data file bytes")
     if not isinstance(manifest.get("partialReasons"), list):
         issues.append("partialReasons must be an array")
+    validate_deep(folder, manifest, issues)
     return issues
 
 

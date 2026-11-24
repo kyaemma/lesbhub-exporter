@@ -31,6 +31,7 @@ jobs:
       - name: Compile Luau files
         run: |
           /tmp/luau/luau-compile src/engine.lua > /dev/null
+          /tmp/luau/luau-compile src/deep_scripts.lua > /dev/null
           /tmp/luau/luau-compile src/ui.lua > /dev/null
           /tmp/luau/luau-compile dist/lesbhub-exporter.lua > /dev/null
           /tmp/luau/luau-compile tests/mock_capture.luau > /dev/null
@@ -53,6 +54,11 @@ jobs:
           python scripts/build_mock_ui.py /tmp/lesbhub-ui-smoke.luau
           /tmp/luau/luau-compile /tmp/lesbhub-ui-smoke.luau > /dev/null
           /tmp/luau/luau /tmp/lesbhub-ui-smoke.luau
+      - name: Verify reconstructed code writer with synthetic sources
+        run: |
+          python scripts/build_mock_deep.py /tmp/lesbhub-deep-smoke.luau
+          /tmp/luau/luau-compile /tmp/lesbhub-deep-smoke.luau > /dev/null
+          /tmp/luau/luau /tmp/lesbhub-deep-smoke.luau
       - name: Validate optional Cobalt plugin
         run: |
           /tmp/luau/luau-compile integrations/cobalt/LesbhubRemoteObserver.luau > /dev/null

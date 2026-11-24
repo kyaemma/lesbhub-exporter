@@ -7,6 +7,7 @@ local function, so the mock "game" globals are visible without changing V1.
 """
 import sys
 from pathlib import Path
+from build import engine_source
 
 ROOT = Path(__file__).resolve().parents[1]
 TOKEN = 'local Exporter = require("../src/engine")'
@@ -16,7 +17,7 @@ def main():
     if len(sys.argv) != 2:
         raise SystemExit("Usage: python scripts/build_mock.py /tmp/test.luau")
     test = (ROOT / "tests" / "mock_capture.luau").read_text(encoding="utf-8")
-    engine = (ROOT / "src" / "engine.lua").read_text(encoding="utf-8").rstrip()
+    engine = engine_source()
     if test.count(TOKEN) != 1:
         raise SystemExit("Mock test entrypoint missing or duplicated")
     patched = test.replace(
