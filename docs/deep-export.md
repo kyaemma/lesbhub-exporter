@@ -3,8 +3,9 @@
 The runtime exporter is autonomous. Potassium MCP was used to develop and test it,
 not to perform the product's discovery, reconstruction or file writes.
 
-Enable **Options → Advanced → Include reconstructed client script code**. This is
-off by default in both the engine and UI. Standard selected-service traversal
+Reconstructed client Luau extraction is **enabled by default** in both the engine
+and all three UI presets. Disable **Options → Advanced → Include reconstructed client script code**
+for a metadata-only capture. Standard selected-service traversal
 discovers LocalScript, ModuleScript and replicated Script objects. The writer
 calls the documented `decompile(instance)` under `pcall`; it never requires a
 captured module, executes reconstructed code, reads original `Script.Source`,
