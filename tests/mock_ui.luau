@@ -229,6 +229,9 @@ local options = window.tabs.Options
 local modePicker = options:find("Dropdown", "Export preset")
 local advanced = options:find("Section", "Advanced")
 assert(advanced and advanced.config.Opened == false)
+local codeToggle = advanced.children:find("Toggle", "Include reconstructed client script code")
+assert(codeToggle and codeToggle.config.Value == true,
+    "Reconstructed Luau should start enabled in ordinary export")
 assert(modePicker, "Preset dropdown missing")
 local capture = window.tabs.Capture
 assert(not capture:find("Code"), "Log must not live inside Capture tab")
@@ -241,6 +244,7 @@ window.lastDialog.Buttons[2].Callback()
 local max = engine.calls[1]
 assert(max and max.targets.PlayerGui and max.targets.StarterGui)
 assert(max.twoPassGui and max.guiPasses == 4)
+assert(max.includeReconstructedCode == true, "Max preset must export Luau by default")
 assert(max.organizedOutput == true, "Folder organization should be enabled by default")
 layoutPicker:Set("Flat (legacy)")
 
@@ -251,6 +255,7 @@ fullBtn.config.Callback()
 window.lastDialog.Buttons[2].Callback()
 local fast = engine.calls[2]
 assert(fast.guiTexts and fast.assets and fast.twoPassGui and fast.guiPasses == 2)
+assert(fast.includeReconstructedCode == true, "Fast preset must retain Luau extraction")
 assert(fast.organizedOutput == false, "Legacy layout selector did not update the config")
 
 assert(not fast.worldProperties and fast.textboxValues and fast.stringValues)
@@ -281,9 +286,18 @@ assert(window.lastDialog.Content:find("Continuous mode monitors", 1, true),
     "Continuous mode consent must explain indefinite capture")
 window.lastDialog.Buttons[2].Callback()
 assert(#engine.calls == 5 and engine.calls[5].continuous == true)
+assert(engine.calls[5].includeReconstructedCode == true, "Continuous mode must export Luau by default")
 assert(engine.calls[5].targets.PlayerGui and engine.calls[5].targets.StarterGui)
 assert(engine.calls[5].continuousInterval == 6, "Fast preset interval missing")
 
+
+-- A deliberate Advanced opt-out must still work for metadata-only diagnostics.
+codeToggle:Set(false)
+fullBtn.config.Callback()
+window.lastDialog.Buttons[2].Callback()
+assert(#engine.calls == 6 and engine.calls[6].includeReconstructedCode == false,
+    "Advanced false must disable decompilation")
+modePicker:Set("Fast") -- restore selected preset and the default before language checks
 
 local shortcut = window.tabs.Settings:find("Keybind", "Show / hide key")
 assert(shortcut and shortcut.config.Value == "RightShift")
