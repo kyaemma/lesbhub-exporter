@@ -8,16 +8,19 @@ local PRESETS = {
     max = {guiTexts = true, guiProperties = true, worldProperties = true, assets = true,
         textboxValues = true, stringValues = true,
         includeAttributes = true, includeTags = true, includeReconstructedCode = true, twoPassGui = true,
+        observeGuiActions = true, observeRemotes = true, frameBudgetMs = 6, runtimeWindowSeconds = 6,
         guiPasses = 4, secondPassDelay = 7, continuousInterval = 3,
         yieldEvery = 45, chunkSize = 200},
     smart = {guiTexts = true, guiProperties = true, worldProperties = true, assets = true,
         textboxValues = true, stringValues = true,
         includeAttributes = true, includeTags = true, includeReconstructedCode = true, twoPassGui = true,
+        observeGuiActions = true, observeRemotes = true, frameBudgetMs = 6, runtimeWindowSeconds = 6,
         guiPasses = 3, secondPassDelay = 6, continuousInterval = 4,
         yieldEvery = 80, chunkSize = 300},
     fast = {guiTexts = true, guiProperties = false, worldProperties = false, assets = true,
         textboxValues = true, stringValues = true,
         includeAttributes = true, includeTags = true, includeReconstructedCode = true, twoPassGui = true,
+        observeGuiActions = true, observeRemotes = true, frameBudgetMs = 6, runtimeWindowSeconds = 6,
         guiPasses = 2, secondPassDelay = 3, continuousInterval = 6,
         yieldEvery = 140, chunkSize = 500},
 }
@@ -30,13 +33,24 @@ local WORDS = {
         "Activé par défaut : écrit les fichiers .luau et un index ; désactivable pour exporter seulement les métadonnées."},
     deep_code_notice = {"Reconstructed client scripts (.luau) will be saved locally if supported. They may differ from original sources.",
         "Les scripts clients reconstruits (.luau) seront enregistrés localement si disponibles. Ils peuvent différer des sources originales."},
-    deep_result = {"Reconstructed scripts: %d saved, %d partial, %d failed/inaccessible. Index: %s",
+    deep_result = {"Reconstructed scripts: %d saved, %d partial, %d failed/inaccessible/empty. Index: %s",
         "Scripts reconstruits : %d sauvés, %d partiels, %d échoués/inaccessibles. Index : %s"},
     copy_report = {"Copy latest export report", "Copier le dernier rapport d'export"},
     search_index = {"Search latest scripts / remotes / GUI", "Rechercher dans les scripts / remotes / GUI"},
     search_index_desc = {"Type a name or path; matches are written to the activity journal.",
         "Saisir un nom ou chemin ; les résultats apparaissent dans le journal."},
     search_button = {"Search indexes", "Rechercher dans les index"},
+    search_sources = {"Search reconstructed source", "Rechercher dans le code reconstruit"},
+    search_mode = {"Search in", "Rechercher dans"},
+    search_index_mode = {"Indexes", "Index"},
+    search_source_mode = {"Source code", "Code source"},
+    search_more = {"Next results", "Résultats suivants"},
+    search_page = {"Page %d (up to %d matches)", "Page %d (jusqu’à %d résultats)"},
+    frame_budget = {"Frame budget (milliseconds)", "Budget par frame (millisecondes)"},
+    runtime_window = {"Passive runtime observation (seconds)", "Observation passive du runtime (secondes)"},
+    report_layers = {"GUI: %s  •  Relations: %s  •  Remote inventory: %s  •  Calls: %s",
+        "GUI : %s  •  Relations : %s  •  Inventaire remote : %s  •  Observations : %s"},
+    report_layer_missing = {"unavailable", "indisponible"},
     gui_actions = {"Observe GUI activations", "Observer les activations GUI"},
     gui_actions_desc = {"Record operator button activations during capture; never clicks automatically.",
         "Enregistrer les activations de boutons pendant la capture ; aucun clic automatique."},
@@ -514,6 +528,10 @@ function UI.open(Engine, restore)
     if config.includeAttributes == nil then config.includeAttributes = true end
     if config.includeTags == nil then config.includeTags = true end
     if config.includeReconstructedCode == nil then config.includeReconstructedCode = true end
+    if config.observeGuiActions == nil then config.observeGuiActions = true end
+    if config.observeRemotes == nil then config.observeRemotes = true end
+    if config.frameBudgetMs == nil then config.frameBudgetMs = 6 end
+    if config.runtimeWindowSeconds == nil then config.runtimeWindowSeconds = 6 end
     local presetKey = restore.preset or "max"
     local running, control, destroyed, nativeBusy = false, nil, false, false
     local runningMode = nil
@@ -714,6 +732,8 @@ function UI.open(Engine, restore)
     addToggle("includeReconstructedCode", "deep_code", "deep_code_desc")
     addToggle("observeGuiActions", "gui_actions", "gui_actions_desc")
     addToggle("observeRemotes", "remote_observation", "remote_observation_desc")
+    addSlider("frameBudgetMs", "frame_budget", 1, 12, 1)
+    addSlider("runtimeWindowSeconds", "runtime_window", 1, 20, 1)
     addToggle("textboxValues", "textbox", "textbox_desc")
     addToggle("stringValues", "stringvalue", "stringvalue_desc")
     addToggle("twoPassGui", "gui_passes_enabled", "gui_passes_desc")
@@ -744,17 +764,30 @@ function UI.open(Engine, restore)
     capture:Paragraph({Title = t("action_group"), Desc = t("continuous_help")})
     local captureStatus = capture:Paragraph({Title = t("ready"), Desc = t("ready_desc")})
     captureSummary = capture:Paragraph({Title = t("last_export"), Desc = t("no_export")})
-    capture:Input({Title = t("search_index"), Desc = t("search_index_desc"), Value = "",
-        Callback = function(value) searchQuery = tostring(value) end})
-    capture:Button({Title = t("search_button"), Icon = "search", Callback = function()
+    local searchMode, searchOffset = "index", 0
+    local function runSearch(reset)
         if not latestFolder or running then return end
-        local matches, reason = Engine.search(latestFolder, searchQuery)
-        local lines = {reason or ""}
+        if reset then searchOffset = 0 else searchOffset = searchOffset + 50 end
+        local matches, reason = Engine.search(latestFolder, searchQuery, {
+            mode = searchMode, offset = searchOffset, limit = 50,
+        })
+        local lines = {tf("search_page", math.floor(searchOffset / 50) + 1, 50), reason or ""}
         for _, row in ipairs(matches or {}) do
             lines[#lines + 1] = row.kind .. " | " .. row.robloxPath .. " | " .. (row.outputPath or row.status or "")
+                .. (row.line and (":"..tostring(row.line))or "")
+            if row.preview then lines[#lines+1]=row.preview end
         end
         journal.setText(table.concat(lines, "\n")); journal.show()
-    end})
+    end
+    capture:Input({Title = t("search_index"), Desc = t("search_index_desc"), Value = "",
+        Callback = function(value) searchQuery = tostring(value); searchOffset = 0 end})
+    capture:Dropdown({Title = t("search_mode"), Values = {t("search_index_mode"), t("search_source_mode")},
+        Value = t("search_index_mode"), Callback = function(value)
+            searchMode = optionName(value) == t("search_source_mode") and "sources" or "index"
+            searchOffset = 0
+        end})
+    capture:Button({Title = t("search_button"), Icon = "search", Callback = function() runSearch(true) end})
+    capture:Button({Title = t("search_more"), Icon = "arrow-down", Callback = function() runSearch(false) end})
     capture:Button({Title = t("copy_report"), Icon = "copy", Callback = function()
         if not latestFolder or type(readfile) ~= "function" then return end
         local ok, text = pcall(readfile, latestFolder .. "/report.md")
@@ -1011,6 +1044,20 @@ function UI.open(Engine, restore)
                         scripts.partial, scripts.failed + scripts.inaccessible + scripts.empty,
                         result.folder .. "/scripts/index.json")
                 end
+                local function layerStatus(value, fallback)
+                    if type(value) == "table" and type(value.status) == "string" then return value.status end
+                    if type(fallback) == "table" and type(fallback.status) == "string" then return fallback.status end
+                    if type(fallback) == "table" and type(fallback.state) == "string" then return fallback.state end
+                    return t("report_layer_missing")
+                end
+                local layers = result.report and result.report.layers or manifest.report and manifest.report.layers
+                local guiState = layerStatus(layers and layers.gui, manifest.guiAnalysis)
+                local relationState = layerStatus(layers and layers.relations, manifest.relations)
+                local inventoryState = layerStatus(layers and layers.remoteInventory, manifest.remoteInventory)
+                local observerState = layerStatus(layers and layers.remoteObservations,
+                    manifest.runtime and manifest.runtime.observer)
+                summary = summary .. "\n" .. tf("report_layers", guiState, relationState,
+                    inventoryState, observerState)
                 event(tf("event_end", summary))
                 if type(manifest.partialReasons) == "table" and #manifest.partialReasons > 0 then
                     event("Notes: " .. table.concat(manifest.partialReasons, ", "))

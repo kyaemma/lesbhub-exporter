@@ -198,6 +198,11 @@ function engine.capture(cfg, onProgress, control)
         stats = {written = 100, files = 1, assetReferences = 3, elapsedSeconds = 0.3}}}
 end
 function engine.savePlace() return true, "mock-save.rbxl" end
+function engine.search(_folder, _query, options)
+    engine.lastSearch = options
+    return {{kind = options.mode, robloxPath = "PlayerGui/Fixture", outputPath = "scripts/sources/Fixture.luau"}},
+        "mock results"
+end
 
 local UI = require("../src/ui")
 local window = UI.open(engine)
@@ -230,8 +235,12 @@ local modePicker = options:find("Dropdown", "Export preset")
 local advanced = options:find("Section", "Advanced")
 assert(advanced and advanced.config.Opened == false)
 local codeToggle = advanced.children:find("Toggle", "Include reconstructed client script code")
+local guiActionToggle = advanced.children:find("Toggle", "Observe GUI activations")
+local remoteObservationToggle = advanced.children:find("Toggle", "Accept optional Cobalt observations")
 assert(codeToggle and codeToggle.config.Value == true,
     "Reconstructed Luau should start enabled in ordinary export")
+assert(guiActionToggle and guiActionToggle.config.Value == true)
+assert(remoteObservationToggle and remoteObservationToggle.config.Value == true)
 assert(modePicker, "Preset dropdown missing")
 local capture = window.tabs.Capture
 assert(not capture:find("Code"), "Log must not live inside Capture tab")
@@ -245,6 +254,10 @@ local max = engine.calls[1]
 assert(max and max.targets.PlayerGui and max.targets.StarterGui)
 assert(max.twoPassGui and max.guiPasses == 4)
 assert(max.includeReconstructedCode == true, "Max preset must export Luau by default")
+assert(max.observeGuiActions == true and max.observeRemotes == true,
+    "Passive GUI/remote observations should be included by default")
+assert(max.frameBudgetMs == 6 and max.runtimeWindowSeconds == 6,
+    "Full export observation defaults missing")
 assert(max.organizedOutput == true, "Folder organization should be enabled by default")
 layoutPicker:Set("Flat (legacy)")
 
@@ -256,9 +269,21 @@ window.lastDialog.Buttons[2].Callback()
 local fast = engine.calls[2]
 assert(fast.guiTexts and fast.assets and fast.twoPassGui and fast.guiPasses == 2)
 assert(fast.includeReconstructedCode == true, "Fast preset must retain Luau extraction")
+assert(fast.observeGuiActions == true and fast.observeRemotes == true)
 assert(fast.organizedOutput == false, "Legacy layout selector did not update the config")
 
 assert(not fast.worldProperties and fast.textboxValues and fast.stringValues)
+
+local searchModePicker = capture:find("Dropdown", "Search in")
+assert(searchModePicker and searchModePicker.value == "Indexes")
+capture:find("Input", "Search latest scripts / remotes / GUI").config.Callback("Fixture")
+capture:find("Button", "Search indexes").config.Callback()
+assert(engine.lastSearch.mode == "index" and engine.lastSearch.offset == 0 and engine.lastSearch.limit == 50)
+capture:find("Button", "Next results").config.Callback()
+assert(engine.lastSearch.offset == 50, "Search pagination must advance explicitly")
+searchModePicker:Set("Source code")
+capture:find("Button", "Search indexes").config.Callback()
+assert(engine.lastSearch.mode == "sources" and engine.lastSearch.offset == 0)
 
 targets:find("Button", "GUI only").config.Callback()
 assert(#picker.value == 2)
@@ -297,6 +322,12 @@ fullBtn.config.Callback()
 window.lastDialog.Buttons[2].Callback()
 assert(#engine.calls == 6 and engine.calls[6].includeReconstructedCode == false,
     "Advanced false must disable decompilation")
+guiActionToggle:Set(false)
+remoteObservationToggle:Set(false)
+fullBtn.config.Callback()
+window.lastDialog.Buttons[2].Callback()
+assert(engine.calls[7].observeGuiActions == false and engine.calls[7].observeRemotes == false,
+    "Advanced false must disable passive observations")
 modePicker:Set("Fast") -- restore selected preset and the default before language checks
 
 local shortcut = window.tabs.Settings:find("Keybind", "Show / hide key")

@@ -68,6 +68,8 @@ local players = {
         end,
     },
 }
+local syntheticAssociations = {}
+function players:GetPlayerFromCharacter(model) return syntheticAssociations[model] end
 function players:GetPlayers()
     return {{Name = "Alice", DisplayName = "Alice", Character = otherCharacter}}
 end
@@ -92,6 +94,14 @@ end
 task = {wait = function() end}
 
 local Exporter = require("../src/engine")
+-- Observe windows and public HTTP metadata are exercised in live tests, not
+-- wall-clock sleeps in this deterministic, synthetic CLI fixture.
+local captureEngine=Exporter.capture
+Exporter.capture=function(options,...)
+    options.runtimeWindowSeconds=0
+    options.publicGameMetadata=false
+    return captureEngine(options,...)
+end
 local capture, err = Exporter.capture({
     label = "Criminality", category = "Criminality", variant = "Test",
     format = "json", targets = {PlayerGui = true, Workspace = true, ReplicatedStorage = true},
@@ -101,6 +111,8 @@ local capture, err = Exporter.capture({
 assert(capture, err)
 local m = capture.manifest
 assert(m.status == "partial", "Workspace streaming must mark partial")
+assert(m.privacy.playerTrackingComplete == false and m.privacy.excludesOtherPlayerCharacters == false,
+    "missing player signals must not claim complete privacy tracking")
 assert(m.stats.written > 0, "No records exported")
 assert(m.stats.files >= 6, "Expected separate category/service chunks")
 assert(m.layout and m.layout.id == "categorized" and m.layout.version == 2)
@@ -432,3 +444,179 @@ print("Luau identity OK: duplicate names, rename, replacement, short events, glo
 
 
 
+
+-- A transient GUI in a later target must survive an earlier service's scan.
+local crossControl={}
+local cross,crossError=Exporter.capture({label="CrossServiceFixture",continuous=true,
+    targets={ReplicatedStorage=true,PlayerGui=true},yieldEvery=10,chunkSize=25},function(info)
+    if info.stage=="service_start" and info.service=="ReplicatedStorage" then
+        local transient=instance("LaterServiceTransient","TextLabel",{Text="kept"})
+        transient.Parent=gui
+        gui.DescendantAdded:Fire(transient)
+        gui.DescendantRemoving:Fire(transient)
+        transient.Parent=nil
+    elseif info.stage=="monitoring_start" then crossControl.stopRequested=true end
+end,crossControl)
+assert(cross,crossError)
+local crossOps={}
+for filename,chunk in pairs(writes)do
+    if filename:find(cross.folder,1,true)and type(chunk)=="table"then
+        for _,record in ipairs(chunk.records or{})do
+            if record.name=="LaterServiceTransient"then crossOps[record.operation]=record end
+        end
+    end
+end
+assert(crossOps.add and crossOps.remove,"later-service transient events were discarded")
+assert(crossOps.add.properties.Text=="kept")
+print("Luau event batching OK: later-service transient records preserved")
+
+-- A late root and an event from that service cannot change the service of
+-- scripts subsequently visited in the active ReplicatedStorage scan.
+local savedChildren = storage._children
+storage._children = {}
+for i = 1, 15 do storage._children[i] = instance("Padding" .. i, "Folder") end
+local crossScript = instance("CrossServiceScript", "LocalScript", {Enabled = true})
+function crossScript:GetDebugId() return "cross-service-script" end
+storage._children[#storage._children + 1] = crossScript
+local savedFind = players.LocalPlayer.FindFirstChild
+local guiQueries = 0
+players.LocalPlayer.FindFirstChild = function(_, name)
+    if name ~= "PlayerGui" then return nil end
+    guiQueries = guiQueries + 1
+    if guiQueries == 1 then return nil end
+    return gui
+end
+local lateControl = {}
+local late, lateError = Exporter.capture({label = "LateRootFixture", continuous = true,
+    targets = {ReplicatedStorage = true, PlayerGui = true}, yieldEvery = 10,
+    chunkSize = 25, includeReconstructedCode = false}, function(info)
+    if info.stage == "service_start" and info.service == "ReplicatedStorage" then
+        local transient = instance("LateRootRemote", "RemoteEvent")
+        transient._attributes = {Synthetic = "preserved"}
+        function transient:GetDebugId() return "late-root-remote" end
+        transient.Parent = gui
+        gui.DescendantAdded:Fire(transient)
+        gui.DescendantRemoving:Fire(transient)
+        transient.Parent = nil
+    elseif info.stage == "monitoring_start" then lateControl.stopRequested = true end
+end, lateControl)
+assert(late, lateError)
+assert(guiQueries > 1 and late.manifest.services.PlayerGui.records > 0,
+    "late root events were dropped before its baseline")
+local scriptsIndex = writes[late.folder .. "/scripts/index.json"]
+local discovered
+for _, entry in ipairs(scriptsIndex.scripts) do
+    if entry.name == "CrossServiceScript" then discovered = entry end
+end
+assert(discovered and discovered.service == "ReplicatedStorage",
+    "cross-service events changed the scanned script's service")
+local remoteIndex = writes[late.folder .. "/remotes/index.json"]
+local removedRemote
+for _, remote in ipairs(remoteIndex.remotes) do
+    if remote.name == "LateRootRemote" then removedRemote = remote end
+end
+assert(removedRemote and removedRemote.removed and removedRemote.operation == "remove"
+    and removedRemote.debugId == "late-root-remote"
+    and removedRemote.properties.Attributes.Synthetic == "preserved"
+    and removedRemote.properties.RemoteInfo.family == "remote",
+    "removed remote must retain its last observed metadata")
+assert(gui.DescendantAdded:Count() == 0 and gui.DescendantRemoving:Count() == 0)
+storage._children = savedChildren
+players.LocalPlayer.FindFirstChild = savedFind
+print("Luau late-root OK: cross-service scripts and removed remote metadata")
+
+local replacementGui = instance("PlayerGui", "PlayerGui", nil, {})
+replacementGui.DescendantAdded, replacementGui.DescendantRemoving = eventSignal(), eventSignal()
+local activeGui, switched, replacementControl = gui, false, {}
+players.LocalPlayer.FindFirstChild = function(_, name) return name == "PlayerGui" and activeGui or nil end
+local replacementCapture, replacementError = Exporter.capture({label = "RootReplacementFixture",
+    continuous = true, continuousInterval = 1, targets = {PlayerGui = true}}, function(info)
+    if info.stage == "monitoring_start" then activeGui = replacementGui; switched = true
+    elseif switched and info.stage == "service_start" and info.service == "PlayerGui" then
+        local transient = instance("ReplacementRootTransient", "TextLabel", {Text = "observed"})
+        transient.Parent = replacementGui
+        replacementGui.DescendantAdded:Fire(transient)
+        replacementGui.DescendantRemoving:Fire(transient)
+        transient.Parent = nil
+        replacementControl.stopRequested = true
+    end
+end, replacementControl)
+assert(replacementCapture, replacementError)
+local replacementOps = {}
+for filename, chunk in pairs(writes) do
+    if filename:find(replacementCapture.folder, 1, true) and type(chunk) == "table" then
+        for _, record in ipairs(chunk.records or {}) do
+            if record.name == "ReplacementRootTransient" then replacementOps[record.operation] = true end
+        end
+    end
+end
+assert(replacementOps.add and replacementOps.remove, "replacement root events disappeared")
+assert(gui.DescendantAdded:Count() == 0 and gui.DescendantRemoving:Count() == 0
+    and replacementGui.DescendantAdded:Count() == 0 and replacementGui.DescendantRemoving:Count() == 0,
+    "root replacement leaked listeners")
+players.LocalPlayer.FindFirstChild = savedFind
+print("Luau replacement-root OK: events retained and listeners disconnected")
+
+-- Track players added and characters respawned after capture starts.
+local savedGetPlayers, savedWorldChildren, savedPlayerAdded = players.GetPlayers, world._children, players.PlayerAdded
+local initialCharacter = instance("InitialCharacter", "Model", nil, {instance("HiddenInitial", "Folder")})
+local respawnedCharacter = instance("RespawnedCharacter", "Model", nil, {instance("HiddenRespawn", "Folder")})
+local joinedCharacter = instance("JoinedCharacter", "Model", nil, {instance("HiddenJoined", "Folder")})
+local earlyCharacter = instance("EarlyCharacter", "Model", nil, {instance("HiddenEarly", "Folder")})
+local localCharacter = instance("LocalCharacter", "Model", nil, {instance("VisibleLocal", "Folder")})
+local existingPlayer = {Name = "ExistingPerson", DisplayName = "ExistingPerson", Character = initialCharacter,
+    CharacterAdded = eventSignal()}
+local joinedPlayer = {Name = "JoinedPerson", DisplayName = "JoinedDisplay", Character = nil,
+    CharacterAdded = eventSignal()}
+local nameChanges = {Name = eventSignal(), DisplayName = eventSignal(), Character = eventSignal()}
+function joinedPlayer:GetPropertyChangedSignal(name) return nameChanges[name] end
+local playerAdded = eventSignal()
+players.PlayerAdded = playerAdded
+players.GetPlayers = function() return {players.LocalPlayer, existingPlayer} end
+players.LocalPlayer.Character = localCharacter
+world._children = {initialCharacter, respawnedCharacter, joinedCharacter, earlyCharacter, localCharacter,
+    instance("JoinedPersonPublicObject", "Folder"), instance("UpdatedDisplayPublicObject", "Folder")}
+local privacyControl = {}
+local privacyCapture, privacyError = Exporter.capture({label = "DynamicPrivacyFixture", continuous = true,
+    targets = {Workspace = true}}, function(info)
+    if info.stage == "service_start" and info.service == "Workspace" then
+        existingPlayer.Character = respawnedCharacter
+        existingPlayer.CharacterAdded:Fire(respawnedCharacter)
+        players.PlayerAdded:Fire(joinedPlayer)
+        syntheticAssociations[earlyCharacter] = joinedPlayer
+        joinedPlayer.Character = joinedCharacter
+        nameChanges.Character:Fire()
+        joinedPlayer.DisplayName = "UpdatedDisplay"
+        nameChanges.DisplayName:Fire()
+    elseif info.stage == "monitoring_start" then privacyControl.stopRequested = true end
+end, privacyControl)
+assert(privacyCapture, privacyError)
+local sawLocal, redactedCount = false, 0
+for filename, chunk in pairs(writes) do
+    if filename:find(privacyCapture.folder, 1, true) and type(chunk) == "table" then
+        for _, record in ipairs(chunk.records or {}) do
+            assert(record.name ~= "HiddenInitial" and record.name ~= "HiddenRespawn"
+                and record.name ~= "HiddenJoined" and record.name ~= "HiddenEarly",
+                "another player's character was exported")
+            if record.name == "VisibleLocal" then sawLocal = true end
+            if record.name == "[player]PublicObject" then redactedCount = redactedCount + 1 end
+        end
+    end
+end
+assert(sawLocal and redactedCount >= 2 and privacyCapture.manifest.privacy.excludesOtherPlayerCharacters,
+    "local character or newly joined player redaction is incorrect")
+assert(playerAdded:Count() == 0 and existingPlayer.CharacterAdded:Count() == 0
+    and joinedPlayer.CharacterAdded:Count() == 0 and nameChanges.Character:Count() == 0
+    and nameChanges.DisplayName:Count() == 0, "privacy listeners leaked on normal completion")
+local oldWait = task.wait
+task.wait = function() error("synthetic capture failure") end
+local failed = Exporter.capture({targets = {Workspace = true}, yieldEvery = 10}, nil, {})
+task.wait = oldWait
+assert(not failed and playerAdded:Count() == 0 and existingPlayer.CharacterAdded:Count() == 0,
+    "privacy listeners leaked after capture error")
+players.PlayerAdded = savedPlayerAdded
+players.GetPlayers = savedGetPlayers
+players.LocalPlayer.Character = nil
+world._children = savedWorldChildren
+table.clear(syntheticAssociations)
+print("Luau privacy tracking OK: joins, respawns, aliases, local character and cleanup")
