@@ -38,6 +38,21 @@ class DeepExportTests(unittest.TestCase):
         manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
         return path, index
 
+    def test_default_script_reconstruction_contract(self):
+        root = Path(__file__).resolve().parents[1]
+        engine = (root / "src" / "engine.lua").read_text(encoding="utf-8")
+        ui = (root / "src" / "ui.lua").read_text(encoding="utf-8")
+        self.assertIn(
+            "cfg.includeReconstructedCode = input.includeReconstructedCode ~= false", engine
+        )
+        self.assertEqual(
+            ui.count("includeReconstructedCode = true, twoPassGui = true"), 3
+        )
+        self.assertIn(
+            "if config.includeReconstructedCode == nil then config.includeReconstructedCode = true end",
+            ui,
+        )
+
     def test_verified_long_source(self):
         with tempfile.TemporaryDirectory() as directory:
             folder = Path(directory)
