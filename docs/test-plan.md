@@ -103,3 +103,20 @@ They cover budget checkpoints, candidate analysis, GUI state reduction, observer
 availability, identity/path relation resolution, report status and artifact
 validation. Live evidence does not replace these controlled cases or imply that
 unvisited menus and server-only behavior were captured.
+
+## v0.9 continuous capture reconstruction
+
+The v0.9 format retains the v1 metadata chunk layout for the initial full snapshot, then records later `add`/`update`/`remove` deltas with capture-local instance IDs and global sequence numbers. GUI state payloads use schemaVersion 2: one baseline projection and later `baseStateId` + `upserts` + `removes`. Immutable journal segments live under `journal/`, with `journal/index.json` declaring counts and sequence ranges. `scripts/validate_export.py` keeps v0.5-v0.8 validation unchanged and applies v0.9 reconstruction checks only to `inspectionVersion: 2`.
+
+| ID | Scenario | Expected result |
+|---|---|---|
+| E79 | 3,600-second deterministic idle fixture | One GUI state projection, zero transitions/events/structural changes, no added state files after baseline; report distinguishes inspections from changes and writes |
+| E80 | GUI sequence A → B → A → B → A | Two unique state projections, four ordered transition occurrences, exact reconstruction of A and B, visit counts 3 and 2 |
+| E81 | GUI base chain contains a cycle or invalid remove | Independent reconstruction and validator reject the damaged history |
+| E82 | 10,000 repeated remote observations | All 10,000 occurrences reconstruct in global sequence order; signature definitions stay separate and shared |
+| E83 | Duplicate object paths / same-name instances | Structural replay keys records by InstanceId and preserves distinct identities at the same path |
+| E84 | Shared reconstructed script bytes | Multiple logical script index entries may reference one identical physical `.luau` path; physical and logical byte/file totals reconcile, and a differing shared file fails |
+| E85 | Journal/checkpoint artifact integrity | Missing segment, wrong count/range, duplicate global sequence, unsafe artifact path, or indexed checkpoint snapshot fails validation; checkpoint directories are excluded from the ordinary artifact ledger |
+| E86 | Historical v0.5-v0.8 fixtures | Validation behavior remains compatible; v0.9-only contracts are gated by `inspectionVersion: 2` |
+
+The Python fixtures independently reconstruct durable GUI, structural and journal rows. They do not exercise Roblox runtime scheduling, native file durability, or a live one-hour capture; report those as unverified until separately observed.

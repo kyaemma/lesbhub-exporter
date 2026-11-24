@@ -2,13 +2,18 @@
 local Report = require("../src/report")
 
 local manifest = {
-    exporterVersion = "0.8.0", status = "partial", capturedAtUtc = "2026-11-24T10:00:00Z",
+    exporterVersion = "0.9.0", status = "partial", capturedAtUtc = "2026-11-24T10:00:00Z",
     endedReason = "finished", game = {label = "Synthetic", placeId = 1, gameId = 2},
     client = {executor = "Mock"}, settings = {observeRemotes = true},
     stats = {written = 12, files = 3, bytes = 4096}, services = {PlayerGui = {records = 5}},
     categories = {gui = {records = 5}}, scriptExport = {enabled = true, indexPath = "scripts/index.json",
         stats = {discovered = 2, succeeded = 1, empty = 1}},
     diagnostics = {remoteObservations = 1, guiActions = 2},
+    dedup = {inspected = 20, uniqueInstances = 8, structuralChanges = 3,
+        scriptSharedReferences = 2, guiStates = 2, guiStateBytes = 700,
+        guiFullSnapshotEquivalentBytes = 9000, eventsWritten = 5,
+        queuedEvents = 0, lostEvents = 0},
+    continuous = {enabled = true, captureMode = "continuous", monitorCycles = 12},
     guiAnalysis = {status = "partial", reason = "one inaccessible widget", counts = {states = 4}},
     relations = {status = "complete", counts = {edges = 3}},
     runtime = {status = "partial", reason = "one capability unknown", counts = {available = 4},
@@ -24,6 +29,8 @@ local report = Report.build(manifest, {
         artifacts = {"remotes/index.json"}, evidence = {source = "static_inventory"}}},
 })
 assert(report.reportVersion == 2)
+assert(report.dedup.inspected == 20 and report.dedup.guiStates == 2)
+assert(report.continuous.enabled == true and report.continuous.monitorCycles == 12)
 assert(report.layers.metadata.status == "partial")
 assert(report.layers.reconstructedScripts.counts.succeeded == 1)
 assert(report.layers.gui.status == "partial")
@@ -35,7 +42,9 @@ assert(report.layers.validation.counts.issues == 0)
 assert(report.sourceFidelity.originalSourceChecksum == "unavailable")
 
 local markdown = Report.markdown(report)
-assert(markdown:find("# Full Export report (v2)", 1, true))
+assert(markdown:find("# Continuous Capture report (v2)", 1, true))
+assert(markdown:find("## Continuous capture", 1, true))
+assert(markdown:find("guiFullSnapshotEquivalentBytes", 1, true))
 assert(markdown:find("empty_script_result", 1, true))
 assert(markdown:find("original source is unavailable", 1, true))
 assert(markdown:find("remoteObservations", 1, true))
@@ -97,4 +106,15 @@ local scriptComplete = Report.build({status = "partial", scriptExport = {enabled
         empty = 0, partial = 0, pending = 0}}})
 assert(scriptComplete.layers.reconstructedScripts.status == "complete",
     "Unrelated global partial status must not taint successful script extraction")
+local overflowed = Report.build({status="stopped", services={}, partialReasons={"event_queue_overflow", "journal_queue_overflow"},
+    settings={observeRemotes=true}, diagnostics={remoteObservations=5},
+    runtime={observer={state="detached", reason="capture_stopped"}}})
+assert(overflowed.layers.metadata.status=="partial", "structural overflow falsely reported complete")
+assert(overflowed.layers.remoteObservations.status=="partial", "journal loss falsely reported complete")
+local unresolved = Report.build({settings={observeRemotes=true}, diagnostics={remoteObservations=2},
+    runtime={observer={state="detached",reason="capture_stopped",unresolvedCalls=1,lostRawObservations=0}}})
+assert(unresolved.layers.remoteObservations.status=="partial"
+    and unresolved.layers.remoteObservations.counts.events==2
+    and unresolved.layers.remoteObservations.counts.unresolvedCalls==1,
+    "unresolved occurrence was hidden or falsely reported fully resolved")
 print("Luau Report mock OK: report v2 layers, unavailable states, reasons, fidelity")

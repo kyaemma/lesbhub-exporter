@@ -31,6 +31,16 @@ Output directory: `LesbhubExporter/cobalt-observations/cobalt-<timestamp>-<suffi
 
 The standalone summary stays outside capture chunks. In v0.8, the exporter adapter subscription writes observations into `remotes/observations.jsonl` and aggregates counts/types in the remote index while a capture is active. It reads caller identity as `callerInstanceId` only when documented `info.Origin` resolves to an actual known Instance. It does not retain or serialize the caller Instance itself. A later identity lookup may enrich a caller association; matching names, source text or time windows do not establish causality. Temporal relations are explicitly marked `causal=false`. No raw arguments are saved.
 
+In v0.9 (`inspectionVersion: 2`), occurrences use immutable segments declared in
+`journal/index.json`; `remotes/signatures.json` holds shared type definitions.
+The exporter callback only admits metadata to a bounded queue. It does not
+read Instance properties, resolve hierarchy, write files or wait for a journal
+flush inside the Cobalt interceptor. Sequence and time are reserved on admission;
+unresolved identities remain explicit typed occurrences. The capture loop performs ordinary flushes on a one-second
+cadence and forces them at checkpoints and finalization. Availability, skipped
+observations, overflow and cleanup remain explicit in the report. See the
+[continuous format](continuous-v09.md) and [validation evidence](continuous-v09-validation.md).
+
 ## What is collected
 
 The plugin records only:

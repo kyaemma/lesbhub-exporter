@@ -13,7 +13,7 @@ def engine_source():
     for symbol, file in (("DeepScripts", "deep_scripts"),("WorkBudget", "work_budget"),
                          ("SourceAnalysis", "source_analysis"),("RuntimeObserver", "runtime_observer"),
                          ("GuiStates", "gui_states"),("ClientMetadata", "client_metadata"),
-                         ("Report", "report"),("Relations", "relations")):
+                         ("Report", "report"),("Relations", "relations"),("Journal", "journal"),("Checkpoints", "checkpoints")):
         token = f'local {symbol} = require("./{file}")'
         if token not in engine:
             continue

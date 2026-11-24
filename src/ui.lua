@@ -75,11 +75,17 @@ local WORDS = {
     continuous_consent = {"Continuous mode monitors client objects and interfaces until you stop it; local files may grow.",
         "Le mode continu surveille les objets et interfaces jusqu'à ton arrêt ; les fichiers locaux peuvent grossir."},
     stopped = {"Stopped and saved", "Arrêté et sauvegardé"},
+    stopped_partial = {"Stopped and saved (partial)", "Arrêté et sauvegardé (partiel)"},
     monitor_started = {"Watching changes — explore the game at your own pace.",
         "Surveillance active — explore le jeu à ton rythme."},
     monitor_finalizing = {"Taking the final GUI snapshot", "Dernière capture GUI"},
     monitor_cycles = {"Checks", "Vérifications"},
     monitor_deltas = {"Changes saved", "Modifications enregistrées"},
+    continuous_metrics = {"Inspected %s • Unique %s • Changes %s • GUI states %s • Events written %s • Occurrences %s • Queue %s",
+        "Inspectés %s • Uniques %s • Modifications %s • États GUI %s • Évts écrits %s • Occurrences %s • File %s"},
+    continuous_details = {"Scripts %s • Shared contents %s • Transitions %s • Unchanged writes avoided %s • Stored %s bytes • Errors %s • Lost %s",
+        "Scripts %s • Contenus mutualisés %s • Transitions %s • Écritures inchangées évitées %s • Stockage %s octets • Erreurs %s • Perdus %s"},
+    metric_unavailable = {"—", "—"},
     monitoring_status = {"Monitoring active", "Surveillance active"},
     action_group = {"Capture actions", "Actions de capture"},
     open_any_interface = {"Open any game menu or interact with the interface before the next snapshot (%d s).",
@@ -306,6 +312,7 @@ local function shortCount(value)
     if n >= 1000 then return string.format("%.1fK", n / 1000) end
     return tostring(math.floor(n))
 end
+
 local function shorten(value, length)
     local s = tostring(value or "")
     return #s <= length and s or ("..." .. s:sub(-(length - 3)))
@@ -347,7 +354,7 @@ local function makeJournal(windui, t, alert)
         ZIndex = 9001, Active = true,
     }, panel)
     round(header, 17)
-    local headerTitle = make("TextLabel", {
+    make("TextLabel", {
         Name = "HeaderTitle", Position = UDim2.fromOffset(17, 11),
         Size = UDim2.new(1, -104, 0, 30), Text = t("journal"), TextXAlignment = Enum.TextXAlignment.Left,
         Font = Enum.Font.GothamBold, TextSize = 17,
@@ -506,6 +513,37 @@ function UI.open(Engine, restore)
     end
     local function tf(key, ...)
         return string.format(t(key), ...)
+    end
+    local function continuousMetrics(source, fallbackStats, occurrenceStats)
+        source = type(source) == "table" and source or {}
+        fallbackStats = type(fallbackStats) == "table" and fallbackStats or {}
+        occurrenceStats = type(occurrenceStats) == "table" and occurrenceStats or {}
+        local function pick(...)
+            for index = 1, select("#", ...) do
+                local key = select(index, ...)
+                local value = source[key]
+                if value == nil then value = fallbackStats[key] end
+                if value == nil then value = occurrenceStats[key] end
+                if value ~= nil then return shortCount(value) end
+            end
+            return t("metric_unavailable")
+        end
+        return tf("continuous_metrics",
+            pick("inspected", "inspectedInstances"),
+            pick("uniqueInstances", "unique", "uniqueDiscovered"),
+            pick("structuralChanges", "changes"),
+            pick("guiStates", "uniqueGuiStates", "stateCount"),
+            pick("eventsWritten", "writes"),
+            pick("occurrences", "remoteOccurrences", "observedCalls", "events"),
+            pick("queuedEvents", "queueDepth", "pending", "pendingEvents"))
+    end
+    local function continuousDetails(source)
+        source = type(source) == "table" and source or {}
+        local function metric(key)
+            return type(source[key]) == "number" and shortCount(source[key]) or t("metric_unavailable")
+        end
+        return tf("continuous_details", metric("scriptsReconstructed"), metric("scriptSharedReferences"),
+            metric("guiTransitions"), metric("unchangedRecords"), metric("storedBytes"), metric("errors"), metric("lostEvents"))
     end
 
     local loaded, windui = pcall(function()
@@ -961,9 +999,11 @@ function UI.open(Engine, restore)
                 shortCount(info.files), shortCount(info.assetReferences), info.elapsedSeconds or 0)
             local activeMonitoring = mode == "continuous"
                 and info.monitoring == true
+            local monitorSource = info.dedup or info.continuous or info
             local monitorSummary = activeMonitoring
                 and ("  |  " .. t("monitor_cycles") .. ": " .. shortCount(info.monitorCycles)
-                    .. "  |  " .. t("monitor_deltas") .. ": " .. shortCount(info.deltaRecords))
+                    .. "  |  " .. t("monitor_deltas") .. ": " .. shortCount(info.deltaRecords)
+                    .. "\n" .. continuousMetrics(monitorSource, info.stats, info.remoteObservations))
                 or ""
             pcall(function()
                 captureStatus:SetTitle(activeMonitoring and t("monitoring_status")
@@ -971,7 +1011,8 @@ function UI.open(Engine, restore)
                 captureStatus:SetDesc(desc .. monitorSummary)
             end)
             journal.setStats(desc .. "  |  " .. t("pending_label") .. ": "
-                .. shortCount(info.pending) .. monitorSummary)
+                .. shortCount(info.pending)
+                .. (activeMonitoring and ("  |  " .. t("monitor_deltas") .. ": " .. shortCount(info.deltaRecords)) or ""))
             local textLines = {
                 tf("stage", tostring(info.service or "-"), tonumber(info.pass) or 1),
                 t("class_label") .. ": " .. tostring(info.currentClass or "-"),
@@ -979,7 +1020,9 @@ function UI.open(Engine, restore)
                 t("discovered_label") .. ": " .. shortCount(info.discovered),
                 t("written_label") .. ": " .. shortCount(info.written),
                 mode == "continuous" and
-                    (t("monitor_deltas") .. ": " .. shortCount(info.deltaRecords)) or "",
+                    (t("monitor_deltas") .. ": " .. shortCount(info.deltaRecords) .. "\n"
+                        .. continuousMetrics(monitorSource, info.stats, info.remoteObservations)
+                        .. "\n" .. continuousDetails(monitorSource)) or "",
                 "---------------------------------------",
                 t("events") .. ":",
             }
@@ -1029,7 +1072,8 @@ function UI.open(Engine, restore)
                 local manifest = result.manifest
                 latestFolder = result.folder
                 local statusLabel = t(manifest.status == "complete" and "completed"
-                    or manifest.status == "stopped" and "stopped"
+                    or manifest.status == "stopped" and
+                        ((type(manifest.partialReasons) == "table" and #manifest.partialReasons > 0) and "stopped_partial" or "stopped")
                     or manifest.status == "cancelled" and "cancelled_status" or "partial")
                 local summary = tf("brief_line",
                     shortCount(manifest.stats.written), shortCount(manifest.stats.files),
@@ -1037,6 +1081,11 @@ function UI.open(Engine, restore)
                 if manifest.settings and manifest.settings.continuous then
                     summary = summary .. "  |  " .. t("monitor_deltas") .. ": "
                         .. shortCount(manifest.stats.deltaRecords or 0)
+                    summary = summary .. "\n" .. continuousMetrics(
+                        manifest.dedup or manifest.continuous,
+                        manifest.stats,
+                        manifest.runtime and manifest.runtime.observer)
+                    summary = summary .. "\n" .. continuousDetails(manifest.dedup)
                 end
                 if manifest.scriptExport and manifest.scriptExport.enabled then
                     local scripts = manifest.scriptExport.stats
@@ -1070,7 +1119,9 @@ function UI.open(Engine, restore)
                     homeSummary:SetTitle(t("home_status") .. ": " .. statusLabel)
                     homeSummary:SetDesc(summary)
                 end)
-                journal.setStats(t("journal_finished") .. " • " .. summary)
+                journal.setStats(statusLabel .. " • " .. tf("brief_line",
+                    shortCount(manifest.stats.written), shortCount(manifest.stats.files),
+                    shortCount(manifest.stats.assetReferences), manifest.stats.elapsedSeconds or 0))
                 journal.setText(table.concat(events, "\n") .. "\n" .. result.folder .. "/manifest.json")
                 alert(t("export_done"), summary)
                 print("[Lesbhub Exporter] " .. result.folder .. "/manifest.json")

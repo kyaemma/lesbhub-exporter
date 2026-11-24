@@ -1,5 +1,7 @@
 -- Lesbhub Exporter V1 - client-side, read-only capture engine.
 -- Reconstructed client code defaults on; no remote invocation or uploads.
+local Journal = require("./journal")
+local Checkpoints = require("./checkpoints")
 local DeepScripts = require("./deep_scripts")
 local WorkBudget = require("./work_budget")
 local SourceAnalysis = require("./source_analysis")
@@ -9,7 +11,7 @@ local ClientMetadata = require("./client_metadata")
 local Report = require("./report")
 local Relations = require("./relations")
 local Exporter = {}
-Exporter.VERSION = "0.8.0"
+Exporter.VERSION = "0.9.0"
 Exporter.SCHEMA_VERSION = 1
 Exporter.TARGETS = {
     "ReplicatedStorage", "ReplicatedFirst", "StarterGui", "PlayerGui",
@@ -732,6 +734,7 @@ local function normalizedConfig(input)
     -- Continuous monitoring continues until an explicit stop/cancel.
     -- The interval is a cadence, NOT a dataset or duration cap.
     cfg.continuousInterval = clamp(input.continuousInterval, 1, 30, 3)
+    cfg.eventQueueLimit = clamp(input.eventQueueLimit, 1, 1000000, 8192)
     cfg.guiPasses = clamp(input.guiPasses, 2, 12, 3)
     cfg.secondPassDelay = clamp(input.secondPassDelay, 1, 30, 6)
     -- Chunk size and yield cadence bound *per-step* work, not the exported dataset.
@@ -764,28 +767,28 @@ end
 
 -- Stable, order-independent fingerprint for selected public/allowlisted fields.
 -- It is deliberately independent of JSON object-key iteration order.
-local function stableValue(value, depth)
-    if depth > 7 then return "<depth>" end
-    if type(value) ~= "table" then return type(value) .. ":" .. tostring(value) end
-    local keys = {}
-    for key in pairs(value) do keys[#keys + 1] = key end
-    table.sort(keys, function(a, b)
-        if type(a) ~= type(b) then return type(a) < type(b) end
-        return tostring(a) < tostring(b)
-    end)
-    local parts = {"{"}
-    for _, key in ipairs(keys) do
-        parts[#parts + 1] = tostring(key)
-        parts[#parts + 1] = "="
-        parts[#parts + 1] = stableValue(value[key], depth + 1)
-        parts[#parts + 1] = ";"
+local function stableValue(value, ancestors)
+    local kind = type(value)
+    if kind ~= "table" then
+        local bytes = kind == "number" and string.format("%.17g", value) or tostring(value)
+        return kind .. ":" .. #bytes .. ":" .. bytes
     end
-    parts[#parts + 1] = "}"
-    return table.concat(parts)
+    ancestors = ancestors or {}
+    assert(not ancestors[value], "cyclic structural value")
+    ancestors[value] = true
+    local entries = {}
+    for key, item in pairs(value) do
+        local encodedKey = stableValue(key, ancestors)
+        local encodedValue = stableValue(item, ancestors)
+        entries[#entries + 1] = #encodedKey .. ":" .. encodedKey .. #encodedValue .. ":" .. encodedValue
+    end
+    ancestors[value] = nil
+    table.sort(entries)
+    return "table:" .. #entries .. ":" .. table.concat(entries)
 end
 
 local function recordFingerprint(record)
-    return tostring(record.className) .. "|" .. stableValue(record.properties or {}, 0)
+    return stableValue({className = record.className, properties = record.properties or {}})
 end
 
 local function capture(options, onProgress, control)
@@ -833,22 +836,32 @@ local function capture(options, onProgress, control)
     local createdDataFolders = {}
     local serviceSnapshots = {}
     local instanceIds = setmetatable({}, {__mode = "k"})
-    local debugIdentities = {}
+    local liveInstances = setmetatable({}, {__mode = "v"})
+    local debugIdentities = setmetatable({}, {__mode = "v"})
+    local debugBucketsByInstance = setmetatable({}, {__mode = "k"})
     local nextInstanceId, nextSequence = 0, 0
     local remoteIndex, guiIndex = {}, {}
     local observedLiving={}
     local diagnostics = {guiActions = 0, remoteObservations = 0, writeErrors = 0,
         cobaltAttached = false, knownCallers = 0}
     local artifacts, assets = {}, {}
+    local currentArtifactBytes = 0
     local artifactIntegrity=true
     local uniqueRecordIds, uniqueClasses, uniqueCount = {}, {}, 0
     local runtimeObserver, guiGraph
     local relations = Relations.new(cfg, {budget=budget,knownIdentity=function(id)return uniqueRecordIds[id]end})
-    local processEvents
+    local processEvents, eventQueueSize
+    local clientMetadata, checkpointWriter, checkpointSidecars
+    local signatureRows,signatureIds={},{}
+    local durableRemoteCounts={}
+    local lastWrittenSequence=0
+    local checkpointWrites=0
     local function artifact(path, content, kind)
         local at=os.clock()
         local checksum,algorithm=DeepScripts.checksum(content,nil,budget)
         budget:native("artifact_checksum",os.clock()-at)
+        local previous=artifacts[path]
+        currentArtifactBytes=currentArtifactBytes-(previous and previous.bytes or 0)+#content
         artifacts[path]={path=path,bytes=#content,checksum=checksum,checksumAlgorithm=algorithm,kind=kind}
     end
     local function writeArtifact(path, content, kind)
@@ -865,11 +878,11 @@ local function capture(options, onProgress, control)
             writefile(base.."/"..path,content)
             if type(readfile)=="function" and type(isfile)=="function" then
                 assert(isfile(base.."/"..path) and readfile(base.."/"..path)==content,"artifact readback mismatch")
-            else artifactIntegrity=false;partial("metadata_readback_unavailable")end
+            else artifactIntegrity=false;partial("metadata_readback_unavailable");error("verified readback APIs unavailable")end
         end)
         budget:native("artifact_write_verify",os.clock()-at)
         if not ok then artifactIntegrity=false;partial("artifact_write_failed:"..path);return false end
-        artifact(path,content,kind)
+        if path:sub(1,12)~="checkpoints/"then artifact(path,content,kind)end
         return true
     end
     local function writeSidecar(path,payload)
@@ -884,50 +897,57 @@ local function capture(options, onProgress, control)
         return writeArtifact(path,content,"sidecar")
     end
     local diagnosticConnections, guiWatched = {}, setmetatable({}, {__mode = "k"})
-    local diagnosticBuffers = { ["gui/actions.jsonl"] = {}, ["remotes/observations.jsonl"] = {},
-        ["gui/transitions.jsonl"] = {} }
-    local diagnosticWritten = {}
-    local flushDiagnostics
-    local function diagnosticEvent(path, event)
-        nextSequence = nextSequence + 1
-        event.sequence = nextSequence
-        event.observedAtUtc = os.date("!%Y-%m-%dT%H:%M:%SZ")
-        event.elapsedSeconds = os.clock()-state.startedAt
-        diagnosticBuffers[path][#diagnosticBuffers[path] + 1] = event
+    local guiCallbacksInFlight, acceptingGuiCallbacks = 0, true
+    local diagnosticWritten={}
+    local streamNames={["gui/actions.jsonl"]="gui-actions",["gui/transitions.jsonl"]="gui-transitions",
+        ["remotes/observations.jsonl"]="remote-observations",["relations/temporal.jsonl"]="temporal-relations"}
+    -- Cobalt and GUI callbacks only enqueue: filesystem work belongs to the pump.
+    local journal=Journal.new({batchSize=256,maxQueued=16384,autoFlush=false},{write=function(path,payload)
+        local ok=writeSidecar(path,payload)
+        if ok and payload.stream=="remote-observations"then
+            for _,row in ipairs(payload.rows)do if row.instanceId ~= nil then
+                local counts=durableRemoteCounts[row.instanceId]or{incoming=0,outgoing=0}
+                local side=row.direction=="Incoming"and"incoming"or"outgoing"
+                counts[side]=counts[side]+1;durableRemoteCounts[row.instanceId]=counts
+            end end
+        end
+        return ok
+    end,
+        measure=function(value)return #HttpService:JSONEncode(portableJson(value))end,
+        onError=function(reason)diagnostics.writeErrors=diagnostics.writeErrors+1;partial(reason)end,
+        onOverflow=function()partial("journal_queue_overflow");state.stopped=true end})
+    local function diagnosticEvent(path,event)
+        if not event.sequence then nextSequence=nextSequence+1;event.sequence=nextSequence end
+        event.observedAtUtc=event.observedAtUtc or os.date("!%Y-%m-%dT%H:%M:%SZ")
+        event.elapsedSeconds=event.elapsedSeconds or(os.clock()-state.startedAt)
+        if not journal:append(assert(streamNames[path]),portableJson(event))then error("journal queue overflow")end
+        diagnosticWritten[path]=true
         return event.sequence
     end
-    flushDiagnostics = function()
-        for path, rows in pairs(diagnosticBuffers) do
-            if #rows > 0 then
-                diagnosticBuffers[path]={}
-                local ok = pcall(function()
-                    assert(createFolders((base .. "/" .. path):match("^(.*)/[^/]+$")))
-                    local parts = {}
-                    for _, row in ipairs(rows) do parts[#parts + 1] = HttpService:JSONEncode(portableJson(row)) end
-                    local content = table.concat(parts, "\n") .. "\n"
-                    if type(appendfile) == "function" then
-                        if not diagnosticWritten[path] then writefile(base .. "/" .. path, "") end
-                        appendfile(base .. "/" .. path, content)
-                    else
-                        local previous = diagnosticWritten[path] and readfile(base .. "/" .. path) or ""
-                        writefile(base .. "/" .. path, previous .. content)
-                    end
-                    diagnosticWritten[path] = true
-                end)
-                if not ok then
-                    local pending=diagnosticBuffers[path]
-                    for _,item in ipairs(pending)do rows[#rows+1]=item end
-                    diagnosticBuffers[path]=rows
-                    diagnostics.writeErrors = diagnostics.writeErrors + 1; partial("diagnostic_write_failed")
-                end
-            end
-        end
+    local lastDiagnosticFlush = os.clock()
+    local function flushDiagnostics(force)
+        if not force and os.clock() - lastDiagnosticFlush < 1 then return true end
+        local ok = journal:flush()
+        if ok then lastDiagnosticFlush = os.clock() end
+        return ok
     end
+    local function readRaw(path)
+        if type(readfile)~="function"or type(isfile)~="function"then return "error","readback unavailable"end
+        local ok,exists=pcall(isfile,base.."/"..path)
+        if not ok then return "error","existence check failed"end
+        if not exists then return "missing"end
+        local readable,value=pcall(readfile,base.."/"..path)
+        return readable and"ok"or"error",value
+    end
+    checkpointWriter=Checkpoints.new({read=readRaw,checksum=function(text)return DeepScripts.checksum(text,nil,budget)end,
+        write=function(path,text)return writeArtifact(path,text,"checkpoint")end,writeJson=writeSidecar})
     local deep = DeepScripts.new(base, cfg.includeReconstructedCode, control, function(entry)
         flushDiagnostics()
         state.currentPath = entry.robloxPath
         notify(onProgress, "extracting_script", state, entry.name)
-    end,{budget=budget,analyze=function(source,entry)
+    end,{budget=budget,artifact=artifact,onOverflow=function()
+        state.lostScriptSources=(state.lostScriptSources or 0)+1;partial("script_queue_overflow");state.stopped=true
+    end,analyze=function(source,entry)
         return portableJson(SourceAnalysis.analyze(source,entry,budget))
     end,pump=function()if processEvents then processEvents(false)end end})
     local function identity(instance)
@@ -942,13 +962,21 @@ local function capture(options, onProgress, control)
             end
             local previous = debugId and debugIdentities[debugId]
             if previous and type(compareinstances) == "function" then
-                local compared, equal = pcall(compareinstances, instance, previous.instance)
-                if compared and equal then id = previous.id end
+                for candidate, candidateId in pairs(previous) do
+                    local compared, equal = pcall(compareinstances, instance, candidate)
+                    if compared and equal then id = candidateId; break end
+                end
             end
             if not id then nextInstanceId = nextInstanceId + 1; id = nextInstanceId end
             instanceIds[instance] = id
-            if debugId then debugIdentities[debugId] = {id = id, instance = instance} end
+            if debugId then
+                local bucket = debugIdentities[debugId]
+                if not bucket then bucket = setmetatable({}, {__mode = "k"}); debugIdentities[debugId] = bucket end
+                bucket[instance] = id
+                debugBucketsByInstance[instance] = bucket
+            end
         end
+        liveInstances[id] = instance
         return id
     end
     state.identity=identity
@@ -964,6 +992,9 @@ local function capture(options, onProgress, control)
             and (record.className == "TextButton" or record.className == "ImageButton") then
             local ok, connection = pcall(function()
                 return instance.Activated:Connect(function()
+                    if not acceptingGuiCallbacks then return end
+                    guiCallbacksInFlight = guiCallbacksInFlight + 1
+                    local ok = pcall(function()
                     local event={event = "activated",
                         instanceId = record.instanceId, robloxPath = record.path,
                         evidence = "observed_activation"}
@@ -971,29 +1002,40 @@ local function capture(options, onProgress, control)
                     if guiGraph then guiGraph:noteActivation(event)end
                     if runtimeObserver then runtimeObserver:noteGuiAction(event)end
                     diagnostics.guiActions = diagnostics.guiActions + 1
+                    end)
+                    guiCallbacksInFlight = guiCallbacksInFlight - 1
+                    if not ok then diagnostics.writeErrors = diagnostics.writeErrors + 1; partial("gui_callback_failed") end
                 end)
             end)
-            if ok then guiWatched[instance] = true; diagnosticConnections[#diagnosticConnections + 1] = connection end
+            if ok then guiWatched[instance] = connection; diagnosticConnections[connection] = true end
         end
     end
     local function observeRecord(record, service, mode, instance)
         local snapshot = serviceSnapshots[service]
         if not snapshot then snapshot = {}; serviceSnapshots[service] = snapshot end
         local previous = snapshot[record.instanceId]
-        local track=cfg.continuous or service=="PlayerGui" or service=="StarterGui"
-        local signature = track and (recordFingerprint(record) .. "|" .. record.path
-            .. "|" .. tostring(record.parentInstanceId)) or nil
-        if track then
-            if mode == "remove" then
-                if not previous then return false end
-                record.operation = "remove"
-                snapshot[record.instanceId] = nil
-            else
-                if previous and previous.signature == signature then return false end
-                record.operation = previous and "update" or (mode ~= "baseline" and "add" or nil)
+        local signature = stableValue({className = record.className, name = record.name,
+            category = record.category, path = record.path, parentPath = record.parentPath,
+            parentInstanceId = record.parentInstanceId, depth = record.depth, properties = record.properties or {}})
+        if mode == "remove" then
+            if not previous then return false end
+            record.operation = "remove"
+            snapshot[record.instanceId] = nil
+        else
+            if previous and previous.signature == signature then
+                state.unchangedRecords = (state.unchangedRecords or 0) + 1
+                return false
             end
-        elseif mode=="add" then record.operation=observedLiving[record.instanceId]and"update"or"add"
-        elseif mode=="remove"then record.operation="remove"
+            record.operation = previous and "update" or (mode ~= "baseline" and "add" or nil)
+        end
+        if mode == "remove" then
+            local watched = instance or liveInstances[record.instanceId]
+            local connection = watched and guiWatched[watched]
+            if connection then
+                pcall(function() connection:Disconnect() end)
+                diagnosticConnections[connection] = nil
+                guiWatched[watched] = nil
+            end
         end
         observedLiving[record.instanceId]=mode~="remove" or nil
         nextSequence = nextSequence + 1
@@ -1004,11 +1046,14 @@ local function capture(options, onProgress, control)
             uniqueRecordIds[record.instanceId]=record.className;uniqueCount=uniqueCount+1
             uniqueClasses[record.className]=(uniqueClasses[record.className]or 0)+1
         end
-        if track and mode ~= "remove" then
+        if mode ~= "remove" then
             snapshot[record.instanceId] = {signature = signature, name = record.name,
                 className = record.className, path = record.path, parentPath = record.parentPath,
                 depth = record.depth, category = record.category, instanceId = record.instanceId,
-                parentInstanceId = record.parentInstanceId, sequence = record.sequence, instance = instance}
+                parentInstanceId = record.parentInstanceId, scriptId = record.scriptId, sequence = record.sequence,
+                -- Keep the current Roblox wrapper alive while this object is present.
+                -- Removing the snapshot releases it; historical records hold no Instance.
+                instance = instance}
         end
         if record.operation then
             state.deltaRecords = state.deltaRecords + 1
@@ -1156,6 +1201,7 @@ local function capture(options, onProgress, control)
         chunkIndexes[key] = part
         state.bytes = state.bytes + #encoded
         state.fileCount = state.fileCount + 1
+        for _,record in ipairs(records)do lastWrittenSequence=math.max(lastWrittenSequence,record.sequence or 0)end
         state.written = state.written + #records
         state.services[serviceName].records = state.services[serviceName].records + #records
         state.services[serviceName].files = state.services[serviceName].files + 1
@@ -1242,7 +1288,7 @@ local function capture(options, onProgress, control)
             instance = root, depth = 0, path = serviceName, parent = "",
             entered = false,
         }}
-        local buckets, steps = {}, 0
+        local buckets, steps, scanComplete = {}, 0, true
         local seen = setmetatable({}, {__mode = "k"})
         state.currentService = serviceName
         state.currentPass = pass
@@ -1292,12 +1338,12 @@ local function capture(options, onProgress, control)
 
                     local okChildren, children = pcall(function() return obj:GetChildren() end)
                     if not okChildren then
+                        scanComplete = false
                         addError(state, "children_unavailable:" .. class)
                         partial("children_unavailable")
                     else
                         frame.children = children
                         frame.nextChild = 1
-                        frame.siblingCounts = {}
                         state.discovered = state.discovered + #children
                     end
                 end
@@ -1308,12 +1354,9 @@ local function capture(options, onProgress, control)
                     state.discovered = state.discovered - 1
                 else
                     local segment = readName(child, cfg, state):gsub("[./\\]", "_")
-                    local counts = frame.siblingCounts
-                    counts[segment] = (counts[segment] or 0) + 1
-                    local suffix = counts[segment] > 1 and ("~" .. counts[segment]) or ""
                     stack[#stack + 1] = {
                         instance = child, depth = frame.depth + 1,
-                        path = frame.path .. "/" .. segment .. suffix,
+                        path = frame.path .. "/" .. segment,
                         parent = frame.path, entered = false,
                     }
                 end
@@ -1323,6 +1366,10 @@ local function capture(options, onProgress, control)
 
             state.pending = math.max(0, state.discovered - state.visited)
             steps = steps + 1
+            -- Backpressure the traversal itself before the asynchronous burst
+            -- limit is reached. Never drain from DescendantAdded callbacks or
+            -- from the event pump used by the script writer.
+            if #deep.queue >= 1024 then deep:drain() end
             if steps % cfg.yieldEvery == 0 then
                 flushDiagnostics()
                 if processEvents then processEvents(false)end
@@ -1333,7 +1380,7 @@ local function capture(options, onProgress, control)
 
         -- Tombstones preserve the same category as the original instance,
         -- even when that instance no longer exists on the client.
-        if deltaMode and not state.stopped then
+        if deltaMode and scanComplete and not state.stopped then
             local inspected = 0
             for id, previous in pairs(previousSnapshot) do
                 if stopCheck() then break end
@@ -1344,6 +1391,7 @@ local function capture(options, onProgress, control)
                         path = previous.path, parentPath = previous.parentPath,
                         depth = previous.depth, properties = {}, category = previous.category,
                         instanceId = previous.instanceId, parentInstanceId = previous.parentInstanceId,
+                        scriptId = previous.scriptId,
                     }
                     observeRecord(tombstone, serviceName, "remove")
                     if not bufferRecord(buckets, tombstone, serviceName, pass,
@@ -1366,11 +1414,30 @@ local function capture(options, onProgress, control)
     -- A provisional manifest makes long-running sessions inspectable and
     -- recoverable even if Roblox/executor exits without an orderly Stop.
     local function checkpoint()
-        flushDiagnostics()
+        if processEvents and not processEvents(true) then return false end
+        if not flushDiagnostics(true) then return false end
+        journal:freeze()
+        local checkpointOk,checkpointError=pcall(function()
+        local structuralVersion = state.deltaRecords
+        local guiActions = diagnostics.guiActions
+        local jiBefore = journal:index()
+        local durableActions = jiBefore.streams["gui-actions"] and jiBefore.streams["gui-actions"].events or 0
+        local durableTransitions = jiBefore.streams["gui-transitions"] and jiBefore.streams["gui-transitions"].events or 0
+        if (eventQueueSize and eventQueueSize() > 0) or guiActions ~= durableActions
+            or guiGraph:summary().transitions ~= durableTransitions then return false end
+        if checkpointSidecars and not checkpointSidecars() then
+            partial("checkpoint_sidecar_failed"); return false
+        end
+        if state.deltaRecords ~= structuralVersion or diagnostics.guiActions ~= guiActions
+            or (eventQueueSize and eventQueueSize() > 0) then return false end
+        local durableSequence=lastWrittenSequence
+        for _,stream in pairs(journal:index().streams)do
+            for _,segment in ipairs(stream.segments)do durableSequence=math.max(durableSequence,segment.lastSequence or 0)end
+        end
         local payload = {
             schemaVersion = Exporter.SCHEMA_VERSION,
             exporterVersion = Exporter.VERSION, clientOnly = true,
-            status = "recording", captureMode = cfg.continuous and "continuous" or "exhaustive",
+            status = "recording", inspectionVersion=2, captureMode = cfg.continuous and "continuous" or "exhaustive",
             capturedAtUtc = os.date("!%Y-%m-%dT%H:%M:%SZ"),
             game = {
                 label = sanitizedString(cfg.label, cfg, state),
@@ -1389,7 +1456,7 @@ local function capture(options, onProgress, control)
             services = state.services,
             scriptExport = deep:summary(),
             diagnostics = diagnostics,
-            identity = {version = 1, scope = "capture_local", ordering = "sequence", lastSequence = nextSequence},
+            identity = {version = 1, scope = "capture_local", ordering = "sequence", pathsMayBeNonUnique=true, lastSequence = durableSequence},
             categories = state.categories,
             layout = {version = cfg.organizedOutput and 2 or 1,
                 id = cfg.organizedOutput and "categorized" or "flat"},
@@ -1403,11 +1470,38 @@ local function capture(options, onProgress, control)
                 includeAttributes = cfg.includeAttributes,
                 includeTags = cfg.includeTags},
         }
-        local ok, encoded = pcall(function() return HttpService:JSONEncode(payload) end)
-        if not ok or not pcall(writefile, base .. "/manifest.json", encoded) then
-            partial("checkpoint_write_failed")
-            addError(state, "checkpoint_write_failed")
-        end
+        payload.clientMetadata=clientMetadata
+        local gi=guiGraph:summary()
+        local ji=journal:index();ji.path="journal/index.json";payload.journal=ji
+        payload.diagnostics=portableJson(diagnostics)
+        payload.diagnostics.remoteObservations=ji.streams["remote-observations"] and ji.streams["remote-observations"].events or 0
+        local observer=runtimeObserver:summary()
+        observer.observedCalls=ji.streams["remote-observations"]and ji.streams["remote-observations"].events or 0
+        payload.runtime={status="partial",observer=observer}
+        payload.guiAnalysis={status="complete",counts=gi}
+        payload.remoteInventory={status="complete",counts={}}
+        payload.relations={status="partial",reason="Capture is still recording; final source analysis has not run.",counts={}}
+        payload.report={version=2,path="report.json",markdownPath="report.md"}
+        payload.artifactIndex={version=1,path="artifacts/index.json"}
+        payload.validation={status="partial",reason="Durable recording checkpoint, not a completed capture.",counts={}}
+        payload.continuous={enabled=cfg.continuous,monitorCycles=state.monitorCycles,checkpointIntervalSeconds=60}
+        payload.privacy={characterExclusionScope="Known associations at observation time; not anonymized."}
+        local summary=journal:summary()
+        -- Freeze mutable tables before any checkpoint blob write can yield.
+        payload=portableJson(payload)
+        local ok,reason=checkpointWriter:save(payload,artifacts,{journalQueued=summary.queued,
+            structuralQueued=eventQueueSize and eventQueueSize() or 0,
+            pendingRawObservations=runtimeObserver:rawPending(),
+            scriptPending=deep:summary().stats.pending,lostEvents=summary.lostEvents+(state.lostStructuralEvents or 0)+runtimeObserver:summary().lostRawObservations,
+            observedSequence=nextSequence})
+        if ok then checkpointWrites=checkpointWrites+1 else partial(reason or"checkpoint_write_failed");addError(state,"checkpoint_write_failed")end
+        local encodedOk,encoded=pcall(function()return HttpService:JSONEncode(portableJson(payload))end)
+        if not encodedOk or not pcall(writefile,base.."/manifest.json",encoded)then partial("checkpoint_manifest_failed")end
+        return ok
+        end)
+        journal:thaw()
+        if not checkpointOk then partial("checkpoint_exception");addError(state,"checkpoint_exception:"..tostring(checkpointError))end
+        return checkpointOk and checkpointError == true
     end
 
     local monitorConnections = {}
@@ -1416,6 +1510,7 @@ local function capture(options, onProgress, control)
     local events = {}
     local eventHead = 1
     local eventTail = 0
+    eventQueueSize = function() return math.max(0, eventTail - eventHead + 1) end
 
     local function disconnectMonitoring()
         for _, pair in pairs(monitorConnections) do
@@ -1448,6 +1543,13 @@ local function capture(options, onProgress, control)
     end
 
     local function enqueue(service, root, instance, operation)
+        if state.eventQueueOverflow or eventTail - eventHead + 1 >= cfg.eventQueueLimit then
+            state.lostStructuralEvents = (state.lostStructuralEvents or 0) + 1
+            state.eventQueueOverflow = true
+            partial("event_queue_overflow")
+            state.stopped = true
+            return
+        end
         local path, parent, depth = pathFor(instance, service, root)
         if not path then return end
         local okClass, class = pcall(function() return instance.ClassName end)
@@ -1463,9 +1565,17 @@ local function capture(options, onProgress, control)
             -- Existing object disappeared before its baseline visit: preserve it
             -- while DescendantRemoving still exposes the original instance.
             enqueue(service, root, instance, "add")
+            if state.eventQueueOverflow then return end
+            if eventTail - eventHead + 1 >= cfg.eventQueueLimit then
+                state.lostStructuralEvents = (state.lostStructuralEvents or 0) + 1
+                state.eventQueueOverflow = true; state.stopped = true
+                partial("event_queue_overflow")
+                return
+            end
         end
+        if operation ~= "remove" then identify(record, instance, service)
+        elseif deep.seen["s" .. record.instanceId] then record.scriptId = "s" .. record.instanceId end
         if not observeRecord(record, service, operation, instance) then return end
-        identify(record, instance, service)
         eventTail = eventTail + 1
         events[eventTail] = {service = service, record = record}
         state.eventQueuePeak=math.max(state.eventQueuePeak or 0,eventTail-eventHead+1)
@@ -1513,11 +1623,23 @@ local function capture(options, onProgress, control)
     -- intact; batching reduces filesystem calls instead of discarding events.
     local eventBuckets, lastEventFlush = {}, os.clock()
     processEvents = function(drain)
-        flushDiagnostics()
+        local successful = flushDiagnostics(drain == true)
+        if runtimeObserver then
+            local remaining = runtimeObserver:rawPending()
+            if not drain then remaining = math.min(remaining, cfg.chunkSize, 64) end
+            while successful and remaining > 0 do
+                if journal:summary().queued > 8192 and not flushDiagnostics(true) then successful = false; break end
+                local batch = math.min(remaining, 64)
+                if not runtimeObserver:drainRaw(batch) then successful = false; break end
+                remaining = remaining - batch
+                budget:checkpoint("remote_raw_drain")
+            end
+        end
         local perService = eventBuckets
         local steps = 0
         local hadGui=false
-        while eventHead <= eventTail and (drain or not stopCheck()) and (drain or steps<cfg.chunkSize)do
+        local drainTail = eventTail
+        while eventHead <= drainTail and (drain or not stopCheck()) and (drain or steps<cfg.chunkSize)do
             local event = events[eventHead]
             events[eventHead] = nil
             eventHead = eventHead + 1
@@ -1543,6 +1665,7 @@ local function capture(options, onProgress, control)
                     end
                     if not bufferRecord(buckets, record, event.service, 2,
                         record.category) then
+                        successful = false
                         state.stopped = true
                         break
                     end
@@ -1561,11 +1684,12 @@ local function capture(options, onProgress, control)
         -- Commit bounded partial chunks at least once per second and at stop.
         if drain or os.clock()-lastEventFlush>=1 then
             for service, buckets in pairs(perService) do
-                if not flushBuckets(buckets, service, 2) then state.stopped = true end
+                if not flushBuckets(buckets, service, 2) then state.stopped = true; successful = false end
             end
             eventBuckets={};lastEventFlush=os.clock()
         end
         if hadGui and guiGraph then guiGraph:commit("structural_events")end
+        return successful
     end
 
     for name,selectedTarget in pairs(cfg.targets)do
@@ -1591,28 +1715,126 @@ local function capture(options, onProgress, control)
         end
         return nil
     end
-    runtimeObserver=RuntimeObserver.new(cfg,{now=os.clock,startedAt=state.startedAt,resolve=resolveInstance,
+    local observerCfg = {observeRemotes=cfg.observeRemotes,correlationWindowSeconds=cfg.correlationWindowSeconds,
+        deferRaw=true,rawQueueLimit=16384}
+    runtimeObserver=RuntimeObserver.new(observerCfg,{now=os.clock,startedAt=state.startedAt,resolve=resolveInstance,
+        reserve=function()
+            nextSequence=nextSequence+1
+            return nextSequence,os.date("!%Y-%m-%dT%H:%M:%SZ"),os.clock()-state.startedAt
+        end,
+        peekRemote=function(instance)
+            local id=instanceIds[instance]
+            local known=id and remoteIndex[id]
+            if known and known.evidence == "static_inventory" and not known.removed then
+                return {instanceId=id,robloxPath=known.robloxPath,className=known.className}
+            end
+            return nil
+        end,
+        peekCaller=function(instance)
+            local id=instanceIds[instance]
+            if id and observedLiving[id] and uniqueRecordIds[id] then
+                local scriptId="s"..id
+                return {instanceId=id,scriptId=deep.seen[scriptId] and scriptId or nil}
+            end
+            return nil
+        end,
+        onRawOverflow=function()partial("remote_raw_queue_overflow");state.stopped=true end,
+        onRawError=function()partial("remote_raw_admission_error");state.stopped=true end,
+        onRawProcessError=function()partial("remote_raw_processing_error");state.stopped=true end,
+        canEmit=function()return journal:summary().queued<16384 end,
+        emitRelation=function(row)return diagnosticEvent("relations/temporal.jsonl",row)end,
         emit=function(row)
-            local seq=diagnosticEvent("remotes/observations.jsonl",row)
+            local key=stableValue({row.argumentCount,row.argumentTypes,row.invokeKind})
+            local signatureId=signatureIds[key]
+            if not signatureId then
+                signatureId=#signatureRows+1;signatureIds[key]=signatureId
+                signatureRows[signatureId]={signatureId=signatureId,argumentCount=row.argumentCount,
+                    argumentTypes=row.argumentTypes,invokeKind=row.invokeKind}
+            end
+            if row.identityStatus == "unresolved" then partial("remote_identity_unresolved") end
+            if row.instanceId and not remoteIndex[row.instanceId]then remoteIndex[row.instanceId]={instanceId=row.instanceId,
+                className=row.className,robloxPath=row.robloxPath,evidence="runtime_observed_definition",knownScriptLinks={},observedScriptLinks={}}end
+            local compact={instanceId=row.instanceId,direction=row.direction,signatureId=signatureId,
+                scriptId=row.scriptId,callerInstanceId=row.callerInstanceId,evidence=row.evidence,elapsedSeconds=row.elapsedSeconds,
+                sequence=row.sequence,observedAtUtc=row.observedAtUtc,identityStatus=row.identityStatus,
+                reason=row.reason,pathEvidence=row.pathEvidence,scopeBasis=row.scopeBasis,
+                callerPathEvidence=row.callerPathEvidence}
+            local seq=diagnosticEvent("remotes/observations.jsonl",compact)
             diagnostics.remoteObservations=diagnostics.remoteObservations+1
             return seq
         end})
-    guiGraph=GuiStates.new({guiStateCacheEntries=64,guiStateCacheBytes=8388608},{now=os.clock,budget=budget,
+    guiGraph=GuiStates.new({}, {now=os.clock,budget=budget,
+        read=function(path)
+            local status,text=readRaw(path)
+            if status~="ok"then return status,text end
+            local ok,value=pcall(function()return HttpService:JSONDecode(text)end)
+            return ok and"ok"or"error",value
+        end,
+        digest=function(text)local sum,algorithm=DeepScripts.checksum(text,nil,budget);return algorithm.."-"..sum end,
+        measure=function(value)return #HttpService:JSONEncode(portableJson(value))end,
         fingerprint=recordFingerprint,write=writeSidecar,emit=function(row)
             local seq=diagnosticEvent("gui/transitions.jsonl",row)
             return seq
         end})
     control._lesbhubCleanup=function()
+        journal:freeze()
+        acceptingGuiCallbacks = false
         stopPlayerTracking()
         disconnectMonitoring()
         runtimeObserver:stop()
-        for _,connection in ipairs(diagnosticConnections)do pcall(function()connection:Disconnect()end)end
+        for connection in pairs(diagnosticConnections)do pcall(function()connection:Disconnect()end)end
     end
     local observerState=runtimeObserver:start()
     diagnostics.cobaltAttached=observerState=="attached"
     if cfg.observeRemotes and observerState~="attached"then partial("remote_observation_"..observerState)end
-    local clientMetadata=portableJson(ClientMetadata.capture(cfg,budget))
+    clientMetadata=portableJson(ClientMetadata.capture(cfg,budget))
+    checkpointSidecars=function()
+        if (deep.dirty or not deep.indexWritten) and not deep:saveIndex() then return false end
+        for _,path in ipairs({"scripts/index.json","scripts/progress.jsonl"})do
+            local status,text=readRaw(path)
+            if status=="ok"then artifact(path,text,"sidecar")
+            elseif path=="scripts/index.json" or status=="error" then return false end
+        end
+        local function orderedRows(map)
+            local rows={};for _,value in pairs(map)do rows[#rows+1]=value end
+            table.sort(rows,function(a,b)return a.instanceId<b.instanceId end);return rows
+        end
+        if not writeSidecar("client.json",clientMetadata) then return false end
+        if not writeSidecar("gui/index.json",{version=2,elements=orderedRows(guiIndex),stateIndex="gui/states/index.json"}) then return false end
+        if not guiGraph:checkpoint() then return false end
+        local stats=runtimeObserver:remoteStats(false)
+        for _,item in ipairs(stats)do local counts=durableRemoteCounts[item.instanceId]or{}
+            item.incoming=counts.incoming or 0;item.outgoing=counts.outgoing or 0
+            -- These aggregates may include observations still queued behind the cut.
+            item.signatures=nil;item.omittedSignatures=nil;item.observedScriptLinks=nil
+        end
+        if not writeSidecar("remotes/index.json",{version=3,remotes=orderedRows(remoteIndex),observationStatistics=stats}) then return false end
+        if not writeSidecar("remotes/signatures.json",{version=1,signatures=signatureRows}) then return false end
+        if not writeSidecar("journal/index.json",journal:index()) then return false end
+        if not writeSidecar("assets/index.json",{version=1,objects=orderedRows(assets)}) then return false end
+        if not writeSidecar("relations/index.json",relations:index()) then return false end
+        local failures={};for _,entry in ipairs(deep.entries)do
+            if entry.status~="success"then failures[#failures+1]={scriptId=entry.scriptId,status=entry.status,error=entry.error}end
+        end
+        if not writeSidecar("errors/index.json",{version=1,metadata=state.errors,scriptFailures=failures}) then return false end
+        return true
+    end
 
+    if type(onProgress)=="function"then
+        local clientProgress=onProgress
+        onProgress=function(info)
+            local gs=guiGraph:summary();local js=journal:summary();local ss=deep:summary().stats
+            info.uniqueInstances=uniqueCount;info.inspected=state.visited;info.structuralChanges=state.deltaRecords
+            info.unchangedRecords=state.unchangedRecords or 0;info.scriptSharedReferences=ss.sharedReferences
+            info.scriptsReconstructed=ss.succeeded;info.storedBytes=currentArtifactBytes
+            info.errors=state.errorCount+diagnostics.writeErrors;info.occurrences=runtimeObserver:summary().observedCalls
+            info.guiStates=gs.states;info.guiTransitions=gs.transitions;info.eventsWritten=js.durableEvents
+            info.queuedEvents=js.queued+runtimeObserver:rawPending();info.pendingRawObservations=runtimeObserver:rawPending()
+            info.queuePeak=math.max(js.queuePeak,state.eventQueuePeak or 0,runtimeObserver:summary().rawPeak or 0)
+            info.lostEvents=js.lostEvents+(state.lostStructuralEvents or 0)+runtimeObserver:summary().lostRawObservations
+            clientProgress(info)
+        end
+    end
     -- Subscribe before scanning, including before GUI/operator interactions.
     -- Event records capture properties immediately; no task.spawn per event.
     if cfg.continuous or cfg.runtimeWindowSeconds>0 then attachListeners() end
@@ -1632,7 +1854,7 @@ local function capture(options, onProgress, control)
         if ok and streaming then partial("workspace_streaming_enabled") end
     end
 
-    if not cfg.continuous and cfg.twoPassGui and not state.stopped
+    if cfg.twoPassGui and not state.stopped
         and (cfg.targets.PlayerGui or cfg.targets.StarterGui) then
         for pass = 2, cfg.guiPasses do
             notify(onProgress, "waiting_gui_pass", state, "PlayerGui")
@@ -1651,11 +1873,10 @@ local function capture(options, onProgress, control)
     end
 
     processEvents(true)
-    deep:saveIndex()
-    checkpoint()
     deep:drain()
+    local initialCheckpoint = checkpoint()
 
-    if not cfg.continuous and cfg.runtimeWindowSeconds>0 and not state.stopped then
+    if cfg.runtimeWindowSeconds>0 and not state.stopped then
         notify(onProgress,"runtime_window_start",state)
         local deadline=os.clock()+cfg.runtimeWindowSeconds
         local nextGui=os.clock()
@@ -1680,10 +1901,11 @@ local function capture(options, onProgress, control)
         -- periodic delta rescans catch changes to already-existing GUI text/visibility.
         local okMonitor, monitorError = pcall(function()
             attachListeners()
-            checkpoint()
             state.monitoring = true
+            state.monitorStartedAt=os.clock()
             notify(onProgress, "monitoring_start", state)
             local lastSharedScan = os.clock()
+            local lastCheckpoint = initialCheckpoint and os.clock() or (os.clock() - 60)
             local cyclePass = 1
             while not stopCheck() do
                 local deadline = os.clock() + cfg.continuousInterval
@@ -1703,20 +1925,20 @@ local function capture(options, onProgress, control)
                 end
                 guiGraph:commit("continuous_refresh")
                 if state.stopped then break end
-                -- Less frequent structural refresh. Workspace is event-driven
-                -- because polling hundreds of thousands of map parts is wasteful.
-                if os.clock() - lastSharedScan >= math.max(15, cfg.continuousInterval * 5) then
+                -- Reconcile selected non-GUI roots less frequently; signals
+                -- preserve short-lived additions/removals between these scans.
+                if os.clock() - lastSharedScan >= math.max(60, cfg.continuousInterval * 5) then
                     lastSharedScan = os.clock()
                     for _, service in ipairs(Exporter.TARGETS) do
                         if cfg.targets[service] and service ~= "PlayerGui"
-                            and service ~= "StarterGui" and service ~= "Workspace" then
+                            and service ~= "StarterGui" then
                             scan(service, cyclePass, "delta")
                         end
                         if state.stopped then break end
                     end
                 end
                 if state.stopped then break end
-                if state.monitorCycles % 3 == 0 then checkpoint() end
+                if os.clock() - lastCheckpoint >= 60 and checkpoint() then lastCheckpoint = os.clock() end
                 notify(onProgress, "monitoring", state)
             end
             disconnectMonitoring()
@@ -1748,16 +1970,33 @@ local function capture(options, onProgress, control)
         notify(onProgress, "monitoring_stopped", state)
     end
 
+    journal:freeze()
+    acceptingGuiCallbacks = false
     disconnectMonitoring()
     runtimeObserver:stop()
-    for _,connection in ipairs(diagnosticConnections)do pcall(function()connection:Disconnect()end)end
+    for connection in pairs(diagnosticConnections)do pcall(function()connection:Disconnect()end)end
     stopPlayerTracking()
-    processEvents(true)
+    -- A disconnected callback may still be suspended inside a yielding write.
+    -- Never publish final indexes while that writer can still commit or update stats.
+    local joinDeadline = os.clock() + 10
+    while journal:isBusy() or runtimeObserver:inFlight() > 0 or guiCallbacksInFlight > 0 do
+        if os.clock() >= joinDeadline then
+            partial("finalization_callbacks_timeout")
+            return nil, string.format("finalization timed out waiting for active callbacks (journalBusy=%s, remote=%d, gui=%d); recover the last verified checkpoint",
+                tostring(journal:isBusy()), runtimeObserver:inFlight(), guiCallbacksInFlight)
+        end
+        budget:wait(0.05)
+    end
+    if not processEvents(true) then
+        return nil, "finalization could not flush the journal or structural events; recover the last verified checkpoint"
+    end
     deep:drain()
     deep:saveIndex()
-    flushDiagnostics()
+    if not flushDiagnostics(true) then return nil, "finalization could not flush the journal; recover the last verified checkpoint" end
     guiGraph:commit("final_observation")
-    flushDiagnostics()
+    if not flushDiagnostics(true) or journal:summary().queued > 0 then
+        return nil, "finalization could not persist all queued journal events; recover the last verified checkpoint"
+    end
     local observerSummary=runtimeObserver:summary()
     diagnostics.remoteObservations=observerSummary.observedCalls
     if cfg.observeRemotes and (observerSummary.state~="detached" or observerSummary.reason~="capture_stopped") then
@@ -1785,8 +2024,10 @@ local function capture(options, onProgress, control)
     local relationIndex=relations:analyze(deep.entries)
     relations:addObserved(observedRemotes,runtimeObserver:relations())
     relationIndex=relations:index()
+    relationIndex.temporalJournal="journal/index.json"
+    relationIndex.summary.temporalAssociations=runtimeObserver:summary().temporalRelations or 0
     local guiSummary=guiGraph:summary()
-    if guiSummary.writeErrors+guiSummary.fingerprintErrors+guiSummary.emitErrors>0 then partial("gui_state_capture_error")end
+    if guiSummary.writeErrors+(guiSummary.readErrors or 0)+guiSummary.fingerprintErrors+guiSummary.emitErrors>0 then partial("gui_state_capture_error")end
     writeSidecar("client.json",clientMetadata)
     writeSidecar("remotes/index.json",{version=2,evidence="static_inventory",remotes=ordered(remoteIndex),
         observation=observerSummary,observationStatistics=observedRemotes})
@@ -1815,16 +2056,17 @@ local function capture(options, onProgress, control)
         end
     end
     writeSidecar("errors/index.json",{version=1,metadata=state.errors,scriptFailures=failures})
-    -- Hash independently written indexes and append-only logs after their writers stop.
-    for _,path in ipairs({"scripts/index.json","scripts/progress.jsonl","gui/actions.jsonl",
-        "gui/transitions.jsonl","remotes/observations.jsonl"})do
-        if type(readfile)=="function" and type(isfile)=="function" then
-            local ok,text=pcall(function()return isfile(base.."/"..path)and readfile(base.."/"..path)end)
-            if ok and type(text)=="string"then artifact(path,text,"sidecar")
-            elseif path=="scripts/index.json"then artifactIntegrity=false;partial("script_index_unverified")end
-        end
+    writeSidecar("remotes/signatures.json",{version=1,signatures=signatureRows})
+    flushDiagnostics(true)
+    local journalIndex=journal:index()
+    writeSidecar("journal/index.json",journalIndex)
+    for _,path in ipairs({"scripts/index.json","scripts/progress.jsonl"})do
+        local status,text=readRaw(path)
+        if status=="ok"then artifact(path,text,"sidecar")
+        elseif path=="scripts/index.json"then artifactIntegrity=false;partial("script_index_unverified")end
     end
-    if not diagnosticWritten["gui/transitions.jsonl"]then writeArtifact("gui/transitions.jsonl","","sidecar")end
+    local journalSummary=journal:summary()
+    if journalSummary.queued>0 or journalSummary.lostEvents>0 then partial("journal_not_fully_durable")end
     local ledger={version=1,artifacts={}}
     local artifactBytes=0
     for _,item in pairs(artifacts)do ledger.artifacts[#ledger.artifacts+1]=item;artifactBytes=artifactBytes+item.bytes end
@@ -1862,12 +2104,13 @@ local function capture(options, onProgress, control)
             monitorCycles = state.monitorCycles, deltaRecords = state.deltaRecords,
             added = state.added, updated = state.updated, removed = state.removed,
         },
-        inspectionVersion=1,
+        inspectionVersion=2,
         scriptExport=scriptSummary,
         clientMetadata=clientMetadata,
-        runtime={status=(not cfg.observeRemotes or (observerSummary.state=="detached"and observerSummary.reason=="capture_stopped"))and"complete"or"partial",
+        runtime={status=(not cfg.observeRemotes or (observerSummary.state=="detached"and observerSummary.reason=="capture_stopped"
+            and observerSummary.unresolvedCalls==0 and observerSummary.lostRawObservations==0))and"complete"or"partial",
             observer=observerSummary,capabilities=clientMetadata.capabilities},
-        guiAnalysis={status=(guiSummary.writeErrors+guiSummary.fingerprintErrors+guiSummary.emitErrors)>0 and"partial"or"complete",
+        guiAnalysis={status=(guiSummary.writeErrors+(guiSummary.readErrors or 0)+guiSummary.fingerprintErrors+guiSummary.emitErrors)>0 and"partial"or"complete",
             counts=guiSummary},
         remoteInventory={status="complete",counts={instances=#ordered(remoteIndex)}},
         relations={status=((observerSummary.droppedRelations or 0)+(observerSummary.droppedPendingCallers or 0))>0 and"partial"or"complete",
@@ -1880,7 +2123,26 @@ local function capture(options, onProgress, control)
             counts={artifactFiles=#ledger.artifacts,artifactBytes=artifactBytes,verifiedSourceFiles=scriptStats.files}},
         profiling=budget:summary(),
         diagnostics=diagnostics,
-        identity = {version = 1, scope = "capture_local", ordering = "sequence", lastSequence = nextSequence},
+        journal={version=1,path="journal/index.json",streams=journalIndex.streams},
+        continuous={enabled=cfg.continuous,captureMode=cfg.continuous and"continuous"or"full",
+            monitorCycles=state.monitorCycles,checkpointIntervalSeconds=60,
+            monitorSeconds=state.monitorStartedAt and(os.clock()-state.monitorStartedAt)or 0,
+            lastDurableSequence=checkpointWriter:summary().lastSequence},
+        dedup={inspected=state.visited,uniqueInstances=uniqueCount,unchangedRecords=state.unchangedRecords or 0,
+            structuralChanges=state.deltaRecords,scriptSharedReferences=scriptStats.sharedReferences or 0,
+            scriptsReconstructed=scriptStats.succeeded,errors=state.errorCount+diagnostics.writeErrors,
+            occurrences=observerSummary.observedCalls,
+            guiStateBytes=guiSummary.stateBytes,guiFullSnapshotEquivalentBytes=guiSummary.fullSnapshotEquivalentBytes,
+            guiDiskReuses=guiSummary.diskReuses,guiStates=guiSummary.states,guiTransitions=guiSummary.transitions,
+            eventsWritten=journalSummary.durableEvents,queuedEvents=journalSummary.queued+observerSummary.pendingRawObservations,
+            queuePeak=math.max(journalSummary.queuePeak,state.eventQueuePeak or 0,observerSummary.rawPeak or 0),
+            lostEvents=journalSummary.lostEvents+(state.lostStructuralEvents or 0)+observerSummary.lostRawObservations,
+            lostRawObservations=observerSummary.lostRawObservations,pendingRawObservations=observerSummary.pendingRawObservations,
+            unresolvedCalls=observerSummary.unresolvedCalls,
+            checkpointWrites=checkpointWrites,storedBytes=artifactBytes,
+            storedByteScope="ledger artifacts; recovery checkpoints and wrapper files excluded",
+            lostScriptSources=state.lostScriptSources or 0},
+        identity = {version = 1, scope = "capture_local", ordering = "sequence", pathsMayBeNonUnique=true, lastSequence = nextSequence},
         services = state.services,
         categories = state.categories,
         layout = {version = cfg.organizedOutput and 2 or 1,
@@ -1917,13 +2179,13 @@ local function capture(options, onProgress, control)
             "Client view only: server-only objects are unavailable.",
             "StreamingEnabled can result in missing Workspace descendants.",
             "No global node, depth, total byte, or string-length limit is applied.",
-            "GUI state projections are deduplicated within a bounded cache; lazy menus must be opened by the operator.",
+            "GUI state projections use durable exact-checked lookup and deltas; lazy menus must be opened by the operator.",
             "Categorized output places data in category/service subfolders while preserving original paths.",
             "Script metadata remains in chunks; reconstructed code is enabled by default in scripts/sources with scripts/index.json.",
             "Native Archivable/Enabled/RunContext, attributes, tags and safe client-visible Instance references are collected when readable.",
             "RemoteInfo contains documented class capabilities only; not intercepted traffic, handlers, argument schemas or observed call direction.",
             "Continuous mode: pass 1 is a full snapshot; later records have operations add/update/remove.",
-            "Workspace changes are captured through client DescendantAdded/DescendantRemoving events.",
+            "Structural signals are reconciled with periodic selected-root rescans; sampling is not a record of every physics frame.",
             "GUI properties are refreshed periodically and unchanged records are not rewritten.",
             "Asset references are exported as property values; binary assets are not downloaded.",
             "Paths and GUI strings can still contain contextual data; review before publishing.",
@@ -1936,7 +2198,7 @@ local function capture(options, onProgress, control)
     end
     local report=Report.build(manifest,{artifacts={metadata={"artifacts/index.json"},
         reconstructedScripts={"scripts/index.json"},gui={"gui/index.json","gui/states/index.json"},
-        remoteInventory={"remotes/index.json"},remoteObservations=diagnosticWritten["remotes/observations.jsonl"]and{"remotes/observations.jsonl"}or{},
+        remoteInventory={"remotes/index.json"},remoteObservations={"journal/index.json","remotes/signatures.json"},
         relations={"relations/index.json"},runtime={"client.json"},validation={"artifacts/index.json"}},
         limitations={"Static code hints and temporal associations do not establish runtime causality.",
             "Only observed GUI states are covered; unactivated controls and lazy menus remain unexplored.",

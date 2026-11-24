@@ -185,3 +185,17 @@ in the manifest. Original `Script.Source` is never serialized into metadata.
 Capture-local identity and global sequence are additive fields; paths/pass numbers
 are insufficient for replay. Sidecars and files are validated by the updated
 `scripts/validate_export.py`.
+
+## Continuous Capture v0.9
+
+`inspectionVersion = 2` identifies the v0.9 inspection extensions; the metadata
+record schema remains version 1. Earlier inspection exports use
+`inspectionVersion = 1` and GUI snapshots with `elements`. Readers must select
+the appropriate GUI and journal format by version. Details, reconstruction and
+recovery commands are in [Continuous Capture v0.9](continuous-v09.md).
+
+Instance IDs are local to one capture. They distinguish simultaneously observed
+instances, including siblings with the same name; neither paths nor names are
+identities. V0.9 paths can be non-unique. Older capture paths can contain
+unstable `~N` sibling suffixes, so path comparisons across captures need more
+than a string match.

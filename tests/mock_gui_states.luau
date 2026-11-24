@@ -1,91 +1,99 @@
 local Gui = require("../src/gui_states")
-local files, transitions = {}, {}
-local writeFails = false
-local function fingerprint(record)
-    local p = record.properties
-    return tostring(record.className) .. "|" .. tostring(p.Visible) .. "|" .. tostring(p.Enabled) .. "|" .. tostring(p.Text)
+local files, events = {}, {}
+local failWrite, failLookupAfterWrite, failRead = false, false, false
+local function fingerprint() return "deliberate collision" end
+local function encode(v)
+    local t = type(v)
+    if t == "string" then return string.format("%q", v) end
+    if t ~= "table" then return tostring(v) end
+    local keys = {}; for k in pairs(v) do keys[#keys+1] = k end
+    table.sort(keys, function(a,b) return tostring(a)<tostring(b) end)
+    local p = {}; for _,k in ipairs(keys) do p[#p+1] = encode(k)..":"..encode(v[k]) end
+    return "{"..table.concat(p,",").."}"
 end
 local context = {
-    fingerprint = fingerprint,
-    write = function(path, payload)
-        if writeFails then return false end
-        assert(not files[path]); files[path] = payload; return true
+    fingerprint=fingerprint, digest=function() return "collision" end,
+    read=function(path)
+        if failRead then return "error", "injected" end
+        if files[path] then return "ok", files[path] end
+        return "missing"
     end,
-    emit = function(event) transitions[#transitions + 1] = event; return #transitions end,
-    now = function() return 0 end,
+    write=function(path, payload)
+        if failWrite then return false end
+        files[path]=payload
+        if failLookupAfterWrite and path:find("/lookup/",1,true) then failLookupAfterWrite=false; return false end
+        return true
+    end,
+    emit=function(event) events[#events+1]=event; return #events end,
+    measure=function(payload) return #encode(payload) end,
 }
-local graph = Gui.new({}, context)
 local function button(id, parent, text, visible, path)
-    return {instanceId = id, parentInstanceId = parent, className = "TextButton",
-        path = path or "PlayerGui/Menu/Play", properties = {Text = text, Visible = visible}}
+    return {instanceId=id,parentInstanceId=parent,className="TextButton",path=path or "PlayerGui/Menu/Play",
+        properties={Text=text,Visible=visible}}
 end
-local a = button(1, 20, "Play", true)
-local b = button(2, 20, "Play", true)
-assert(graph:observe(a) and graph:observe(b))
-assert(graph:commit("baseline") == 1)
-assert(graph:observe(a) and graph:observe(b))
-assert(graph:commit("same") == 1)
-assert(graph:summary().states == 1 and graph:summary().observations == 2)
-assert(#files["gui/states/state000001.json"].elements == 2)
-graph:noteActivation({instanceId = 1, sequence = 7})
-assert(graph:summary().knownButtons == 2 and graph:summary().activatedKnownButtons == 1)
-assert(graph:summary().unactivatedKnownButtons == 1)
-assert(graph:observe(button(1, 20, "Pause", true)))
-assert(graph:commit("text") == 2)
-assert(graph:observe(button(1, 20, "Pause", false)))
-assert(graph:commit("visibility") == 3)
-assert(graph:observe(button(1, 21, "Pause", false)))
-assert(graph:commit("parent") == 4)
-assert(graph:observe({instanceId = 2, operation = "remove"}))
-assert(graph:commit("remove") == 5)
-assert(#graph:index().states == 5 and #graph:index().transitions == 4)
-assert(transitions[1].causal == false and transitions[1].evidence == "successive_observations")
-assert(graph:index().buttons[1].activationCount == 1 and graph:index().buttons[2].activationCount == 0)
-writeFails = true
-assert(graph:observe(button(1, 21, "Next", true)))
-assert(graph:commit("error") == nil and graph:summary().writeErrors == 1)
-writeFails = false
-assert(graph:commit("retry") == 6)
-local small = Gui.new({guiStateCacheEntries = 1}, context)
--- Separate output collector: each graph normally writes into a separate export directory.
-context.write = function() return true end
-assert(small:observe(button(1, 20, "a", true)))
-assert(small:commit("a") == 1)
-assert(small:observe(button(1, 20, "b", true)))
-assert(small:commit("b") == 2)
-assert(small:observe(button(1, 20, "a", true)))
-assert(small:commit("a_again") == 3 and small:summary().cacheEvictions == 2)
-local fingerprintCalls, writes = 0, 0
-local fast = Gui.new({guiStateCacheEntries = 0}, {
-    fingerprint = function(record) fingerprintCalls += 1; return fingerprint(record) end,
-    write = function() writes += 1; return true end,
-    emit = function() return 1 end,
-})
-assert(fast:observe(a) and fast:commit("first") == 1)
-assert(fast:observe(a) and fast:commit("unchanged") == 1)
-assert(writes == 1 and fast:summary().observations == 2)
-assert(fingerprintCalls == 2)
-local during, checkpoints, versions = nil, 0, {}
-local changeDuringCommit = false
-local yieldingContext = {fingerprint = fingerprint,
-    write = function(_, payload) versions[#versions + 1] = payload; return true end,
-    emit = function() return 1 end,
-    budget = {checkpoint = function()
-        checkpoints += 1
-        if changeDuringCommit then
-            changeDuringCommit = false
-            assert(during:observe({instanceId = 129, operation = "remove"}))
-        end
-    end}}
-during = Gui.new({}, yieldingContext)
-for i = 1, 129 do assert(during:observe(button(i, 20, "same", true))) end
-changeDuringCommit = true
-assert(during:commit("before_yield") == 1)
-assert(#versions[1].elements == 129)
-assert(during:commit("after_yield") == 2 and #versions[2].elements == 128)
-local before = checkpoints
-assert(during:commit("clean") == 2 and checkpoints == before, "clean commit must not rebuild")
-local badContext = {fingerprint = function() error("unreadable") end, write = function() error("must not write") end, emit = function() end}
-local bad = Gui.new({}, badContext)
-assert(not bad:observe(a) and bad:commit("invalid") == nil and bad:summary().fingerprintErrors == 1)
-print("GUI states mock OK: dedup, identity, structure, coverage, errors, bounded cache")
+local graph = Gui.new({guiStateCacheEntries=0}, context)
+local a, b = button(1,20,"Play",true), button(1,20,"Pause",true)
+for i, record in ipairs({a,b,a,b,a}) do
+    assert(graph:observe(record)); assert(graph:commit("test") == (i%2==1 and 1 or 2))
+end
+assert(#events==4 and graph:summary().transitions==4 and graph:summary().diskReuses==3)
+assert(graph:index().states[1].observations==3 and graph:index().states[2].observations==2)
+assert(files["gui/states/state000002.json"].baseStateId==1)
+local rebuilt = assert(Gui.reconstruct(context,2)); assert(rebuilt[1].properties.Text=="Pause")
+assert(graph:observe(button(1,21,"Play",false,"Other"))); assert(graph:commit("move")==3)
+assert(graph:observe({instanceId=1,operation="remove"})); assert(graph:commit("remove")==4)
+assert(next(assert(Gui.reconstruct(context,4)))==nil)
+failWrite=true; assert(graph:observe(button(1,20,"New",true))); assert(graph:commit("retry")==nil)
+failWrite=false; assert(graph:commit("retry")==5)
+local old = files["gui/states/lookup/collision/1.json"]
+files["gui/states/lookup/collision/1.json"] = {schemaVersion=2,digest="bad",stateId=1}
+assert(graph:observe(b)); assert(graph:commit("corrupt")==nil)
+files["gui/states/lookup/collision/1.json"] = old
+failRead=true; assert(graph:commit("bad read")==nil); failRead=false
+assert(graph:commit("restored")==2)
+local lost = Gui.new({}, context)
+files={}; events={}; failLookupAfterWrite=true
+assert(lost:observe(a)); assert(lost:commit("first")==nil)
+assert(lost:commit("retry")==1 and #lost:index().states==1)
+files={}; events={}; local yielding, changed = nil, false
+context.budget={checkpoint=function()
+    if not changed then changed=true; assert(yielding:observe({instanceId=129,operation="remove"})) end
+end}
+yielding=Gui.new({},context)
+for i=1,129 do assert(yielding:observe(button(i,20,"same",true))) end
+assert(yielding:commit("before yield")==1 and files["gui/states/state000001.json"].elementCount==129)
+assert(yielding:commit("after yield")==2 and files["gui/states/state000002.json"].elementCount==128)
+context.budget=nil
+files={}; events={}; local checkpoints=Gui.new({},context)
+for i=1,66 do
+    assert(checkpoints:observe(button(1,20,tostring(i),true)))
+    assert(checkpoints:commit("version")==i)
+end
+assert(files["gui/states/state000065.json"].baseStateId==nil)
+assert(checkpoints:observe(button(1,20,"1",true)) and checkpoints:commit("return")==1)
+assert(checkpoints:checkpoint() and files["gui/states/index.json"].schemaVersion==2)
+files={}; events={}; local projection=Gui.new({},context)
+local complete={instanceId=31,parentInstanceId=9,className="TextBox",path="PlayerGui/Foo",
+    properties={Visible=true,Enabled=false,Text="x|;:=\n",Active=true,Interactable=false,
+        Selected=true,Selectable=false,TextEditable=true,ScrollingEnabled=false,Playing=true,Ignored="excluded"}}
+assert(projection:observe(complete) and projection:commit("all")==1)
+local exact=assert(Gui.reconstruct(context,1))[31]
+for k,v in pairs(complete.properties) do if k~="Ignored" then assert(exact.properties[k]==v) end end
+assert(exact.properties.Ignored==nil and exact.parentInstanceId==9 and exact.className=="TextBox" and exact.path=="PlayerGui/Foo")
+complete.properties.Interactable=true
+assert(projection:observe(complete) and projection:commit("change")==2)
+local invalid = Gui.new({}, {fingerprint=function() error("bad") end})
+assert(not invalid:observe(a) and invalid:commit()==nil and invalid:summary().fingerprintErrors==1)
+-- A large deterministic fixture: equivalent-size and delta-size use the same serializer.
+files={}; events={}; local large=Gui.new({},context)
+for i=1,10000 do assert(large:observe(button(i,20,"Button "..i,true))) end
+assert(large:commit("A")==1)
+assert(large:observe(button(1,20,"Changed",true))); assert(large:commit("B")==2)
+assert(large:observe(button(1,20,"Button 1",true))); assert(large:commit("A")==1)
+assert(large:observe(button(1,20,"Changed",true))); assert(large:commit("B")==2)
+assert(large:observe(button(1,20,"Button 1",true))); assert(large:commit("A")==1)
+for _=1,3600 do assert(large:commit("idle")==1) end
+local s=large:summary()
+assert(s.states==2 and s.transitions==4 and s.observations==3605 and s.diskReuses==3)
+print("GUI fixture: states="..s.states.." transitions="..s.transitions.." idle=3600 encoded-delta="..s.stateBytes.." encoded-full="..s.fullSnapshotEquivalentBytes)
+print("GUI states mock OK: exact projection, durable lookup, collision, replay, eviction, write/read failures")

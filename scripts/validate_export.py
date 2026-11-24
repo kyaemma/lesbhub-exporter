@@ -133,10 +133,18 @@ def validate_deep(folder: Path, manifest: dict, issues: list[str]) -> None:
     except (OSError, ValueError, KeyError, TypeError) as exc:
         issues.append(f"scripts/index.json: {exc}")
         return
+    index_version = index.get("version", 1)
+    if index_version not in {1, 2}:
+        issues.append("scripts/index.json: unsupported version")
+        return
+    if index_version == 2 and summary.get("version") != 2:
+        issues.append("scriptExport summary version differs from scripts index")
     counts = dict(discovered=len(entries), attempted=0, succeeded=0, failed=0,
                   inaccessible=0, empty=0, partial=0, skipped=0, pending=0,
                   files=0, bytes=0)
-    ids, outputs = set(), set()
+    if index_version == 2:
+        counts.update(logicalFiles=0, logicalBytes=0, sharedReferences=0)
+    ids, instance_ids, outputs, physical_sources = set(), set(), {}, {}
     for n, entry in enumerate(entries, 1):
         label = f"scripts/index.json entry {n}"
         if not isinstance(entry, dict):
@@ -150,6 +158,13 @@ def validate_deep(folder: Path, manifest: dict, issues: list[str]) -> None:
             issues.append(f"{label}: invalid/duplicate scriptId")
         else:
             ids.add(script_id)
+        if index_version == 2:
+            instance_id = entry.get("instanceId")
+            if (not isinstance(instance_id, int) or isinstance(instance_id, bool)
+                    or instance_id < 1 or instance_id in instance_ids):
+                issues.append(f"{label}: invalid/duplicate instanceId")
+            else:
+                instance_ids.add(instance_id)
         status = entry["status"]
         if not isinstance(status, str) or status not in {"success", "failed", "inaccessible", "empty", "partial"}:
             issues.append(f"{label}: invalid final status"); continue
@@ -183,8 +198,10 @@ def validate_deep(folder: Path, manifest: dict, issues: list[str]) -> None:
                 or not (folder / output).resolve().is_relative_to(folder.resolve())):
             issues.append(f"{label}: unsafe outputPath"); continue
         if output.casefold() in outputs:
-            issues.append(f"{label}: duplicate outputPath")
-        outputs.add(output.casefold())
+            if index_version == 1 or outputs[output.casefold()] != output:
+                issues.append(f"{label}: duplicate or case-colliding outputPath")
+        else:
+            outputs[output.casefold()] = output
         file = folder / output
         if status in {"success", "partial"} and not file.is_file():
             issues.append(f"{label}: missing .luau file"); continue
@@ -197,6 +214,8 @@ def validate_deep(folder: Path, manifest: dict, issues: list[str]) -> None:
             offset = entry["headerByteLength"]
             if not isinstance(offset, int) or not 0 <= offset <= len(content):
                 raise ValueError("invalid headerByteLength")
+            if index_version == 2 and output.startswith("scripts/sources/content/") and offset != 0:
+                raise ValueError("v2 shared source files require headerByteLength 0")
             source = content[offset:]
             if len(source) != entry["byteLength"] or len(content) != entry["fileByteLength"]:
                 raise ValueError("byte length mismatch")
@@ -210,9 +229,22 @@ def validate_deep(folder: Path, manifest: dict, issues: list[str]) -> None:
                 source.decode("utf-8")
                 if entry.get("truncationDetected") or entry.get("compiles") is not True:
                     raise ValueError("success requires syntax validation and no detected truncation")
-            counts["files"] += 1; counts["bytes"] += len(content)
+            if index_version == 1:
+                counts["files"] += 1
+                counts["bytes"] += len(content)
+            else:
+                previous = physical_sources.get(output)
+                if previous is not None and previous != content:
+                    raise ValueError("shared outputPath content differs between logical entries")
+                physical_sources[output] = content
+                counts["logicalFiles"] += 1
+                counts["logicalBytes"] += len(content)
         except (OSError, ValueError, KeyError, TypeError) as exc:
             issues.append(f"{label}: {exc}")
+    if index_version == 2:
+        counts["files"] = len(physical_sources)
+        counts["bytes"] = sum(len(content) for content in physical_sources.values())
+        counts["sharedReferences"] = counts["logicalFiles"] - counts["files"]
     for stats_name, stats in (("index", index.get("stats")), ("manifest", summary.get("stats"))):
         if not isinstance(stats, dict) or any(stats.get(k) != v for k, v in counts.items()):
             issues.append(f"scriptExport {stats_name} counters differ from script index/files")
@@ -225,6 +257,8 @@ INSPECTION_SIDECARS = {
     "client.json", "assets/index.json", "relations/index.json", "gui/states/index.json",
     "gui/transitions.jsonl", "errors/index.json", "artifacts/index.json",
 }
+V09_LEGACY_LOGS = {"gui/actions.jsonl", "gui/transitions.jsonl",
+                   "remotes/observations.jsonl", "relations/temporal.jsonl"}
 INSPECTION_LAYERS = {"metadata", "reconstructedScripts", "gui", "remoteInventory",
                      "remoteObservations", "runtime", "relations", "validation"}
 LAYER_STATUSES = {"complete", "partial", "unavailable", "disabled", "not_observed"}
@@ -232,44 +266,212 @@ LEDGER_EXCLUDED = {"manifest.json", "report.json", "report.md", "artifacts/index
 
 
 def validate_inspection(folder: Path, manifest: dict, issues: list[str]) -> None:
-    if manifest.get("inspectionVersion") != 1:
-        issues.append("inspectionVersion must be 1")
+    inspection_version = manifest.get("inspectionVersion")
+    if inspection_version not in {1, 2}:
+        issues.append("inspectionVersion must be 1 or 2")
     if not isinstance(manifest.get("scriptExport"), dict):
         issues.append("inspection manifest requires scriptExport")
-    for name in INSPECTION_SIDECARS | {"report.json", "report.md"}:
+    required_sidecars = INSPECTION_SIDECARS if inspection_version == 1 else (
+        INSPECTION_SIDECARS - {"gui/transitions.jsonl"}) | {
+            "journal/index.json", "remotes/signatures.json"}
+    for name in required_sidecars | {"report.json", "report.md"}:
         if not (folder / name).is_file():
             issues.append(f"{name}: missing required inspection artifact")
 
+    if inspection_version == 2:
+        present_legacy_logs = sorted(name for name in V09_LEGACY_LOGS if (folder / name).exists())
+        if present_legacy_logs:
+            issues.append("v0.9 must use immutable journal segments, not legacy monolithic logs: "
+                          + ", ".join(present_legacy_logs))
+
     try:
         states_index = json.loads((folder / "gui/states/index.json").read_text(encoding="utf-8"))
-        states = states_index.get("states") if isinstance(states_index, dict) else None
-        if states == {}:
-            states = []
-        if not isinstance(states, list):
-            raise ValueError("states must be an array")
-        state_paths, state_ids = set(), set()
-        for state in states:
+        if inspection_version == 2:
+            if not isinstance(states_index, dict) or states_index.get("schemaVersion") != 2:
+                raise ValueError("v0.9 GUI states index must use schemaVersion 2")
+            from reconstruct_export import ReconstructionError, reconstruct_gui
+            descriptors = states_index.get("states")
+            if descriptors == {}:
+                descriptors = []
+            if not isinstance(descriptors, list):
+                raise ValueError("states must be an array")
+            state_ids = set()
+            for descriptor in descriptors:
+                if not isinstance(descriptor, dict):
+                    issues.append("gui/states/index.json: state descriptor must be an object")
+                    continue
+                state_id = descriptor.get("stateId")
+                if not isinstance(state_id, int) or isinstance(state_id, bool) or state_id < 1 or state_id in state_ids:
+                    issues.append("gui/states/index.json: invalid or duplicate stateId")
+                    continue
+                state_ids.add(state_id)
+                try:
+                    reconstruct_gui(folder, state_id)
+                except (OSError, ValueError, TypeError, ReconstructionError) as exc:
+                    issues.append(f"gui/states/index.json: state {state_id}: {exc}")
             try:
-                if not isinstance(state, dict):
-                    raise ValueError("state entry must be an object")
-                state_id, path = state.get("stateId"), state.get("path")
-                if not isinstance(state_id, int) or isinstance(state_id, bool) or state_id < 1:
-                    raise ValueError("invalid stateId")
-                if path != f"gui/states/state{state_id:06d}.json" or state_id in state_ids:
-                    raise ValueError("invalid or duplicate state path/ID")
-                state_ids.add(state_id); state_paths.add(path)
-                projection = json.loads(safe_file(folder, path).read_text(encoding="utf-8"))
-                elements = projection.get("elements") if isinstance(projection, dict) else None
-                if elements == {}:
-                    elements = []
-                if (not isinstance(projection, dict) or projection.get("stateId") != state_id
-                        or not isinstance(elements, list) or state.get("elementCount") != len(elements)):
-                    raise ValueError("state projection differs from index")
+                from reconstruct_export import indexed_gui_lookup_paths
+                indexed_gui_lookup_paths(folder)
             except (OSError, ValueError, TypeError) as exc:
-                issues.append(f"gui/states/index.json: {exc}")
-        for file in (folder / "gui/states").glob("state*.json"):
-            if file.relative_to(folder).as_posix() not in state_paths:
-                issues.append(f"{file.relative_to(folder)}: unindexed GUI state")
+                issues.append(f"gui/states/lookup: invalid lookup index: {exc}")
+            transitions = states_index.get("transitions", [])
+            if transitions == {}:
+                transitions = []
+            if not isinstance(transitions, list):
+                issues.append("gui/states/index.json: transitions must be an array")
+            else:
+                for transition in transitions:
+                    if not isinstance(transition, dict):
+                        issues.append("gui/states/index.json: transition must be an object")
+                        continue
+                    if (transition.get("fromStateId") not in state_ids
+                            or transition.get("toStateId") not in state_ids
+                            or not isinstance(transition.get("count"), int)
+                            or isinstance(transition.get("count"), bool)
+                            or transition.get("count", 0) < 1):
+                        issues.append("gui/states/index.json: invalid transition endpoints/count")
+            try:
+                from reconstruct_export import iter_events, replay_structure
+                events = iter_events(folder)
+                global_sequences = set()
+                transition_counts = defaultdict(int)
+                remote_event_count = 0
+                unresolved_remote_count = 0
+                event_count = 0
+                for row in events:
+                    event_count += 1
+                    sequence = row.get("sequence")
+                    if sequence in global_sequences:
+                        issues.append(f"journal: duplicate global sequence {sequence}")
+                    global_sequences.add(sequence)
+                    if row.get("stream") == "gui-transitions":
+                        source, target = row.get("fromStateId"), row.get("toStateId")
+                        if source not in state_ids or target not in state_ids:
+                            issues.append("journal GUI transition references an unknown state")
+                        else:
+                            transition_counts[(source, target)] += 1
+                    elif row.get("stream") == "remote-observations":
+                        remote_event_count += 1
+                        unresolved = row.get("identityStatus") == "unresolved"
+                        if unresolved:
+                            unresolved_remote_count += 1
+                            if (row.get("reason") != "deferred_identity_unavailable"
+                                    or any(key in row for key in ("instanceId", "robloxPath", "path", "name",
+                                                                  "className", "callerInstanceId", "scriptId"))):
+                                issues.append("unresolved remote occurrence must not invent identity or caller metadata")
+                        elif (row.get("identityStatus", "resolved") != "resolved"
+                              or not isinstance(row.get("instanceId"), int)
+                              or isinstance(row.get("instanceId"), bool) or row.get("instanceId", 0) < 1):
+                            issues.append("journal remote observation lacks a positive resolved identity")
+                        if (row.get("direction") not in {"Incoming", "Outgoing"}
+                                or not isinstance(row.get("signatureId"), int)
+                                or isinstance(row.get("signatureId"), bool) or row.get("signatureId", 0) < 1):
+                            issues.append("journal remote observation lacks identity/direction/signature")
+                        if any(key in row for key in ("args", "arguments", "payload", "argumentValues")):
+                            issues.append("journal remote observation must not store argument values")
+                if isinstance(transitions, list):
+                    indexed_counts = defaultdict(int)
+                    for transition in transitions:
+                        if isinstance(transition, dict):
+                            indexed_counts[(transition.get("fromStateId"), transition.get("toStateId"))] += transition.get("count", 0)
+                    if dict(indexed_counts) != dict(transition_counts):
+                        issues.append("GUI transition summary differs from journal occurrences")
+                signatures = json.loads((folder / "remotes/signatures.json").read_text(encoding="utf-8"))
+                if not isinstance(signatures, dict) or signatures.get("version") != 1:
+                    raise ValueError("remotes/signatures.json must use version 1")
+                signature_rows = signatures.get("signatures")
+                if signature_rows == {}:
+                    signature_rows = []
+                if not isinstance(signature_rows, list):
+                    raise ValueError("remote signatures must be an array")
+                signature_ids = set()
+                for signature in signature_rows:
+                    if not isinstance(signature, dict):
+                        issues.append("remotes/signatures.json: signature must be an object")
+                        continue
+                    signature_id = signature.get("signatureId")
+                    if not isinstance(signature_id, int) or isinstance(signature_id, bool) or signature_id < 1 or signature_id in signature_ids:
+                        issues.append("remotes/signatures.json: invalid or duplicate signatureId")
+                    else:
+                        signature_ids.add(signature_id)
+                    if (not isinstance(signature.get("argumentCount"), int)
+                            or isinstance(signature.get("argumentCount"), bool)
+                            or signature.get("argumentCount", -1) < 0
+                            or not isinstance(signature.get("argumentTypes"), list)
+                            or any(not isinstance(kind, str) for kind in signature.get("argumentTypes", []))
+                            or signature.get("invokeKind") not in {None, "Request", "Callback"}):
+                        issues.append("remotes/signatures.json: invalid signature fields")
+                for row in iter_events(folder):
+                    if (row.get("stream") == "remote-observations"
+                            and row.get("signatureId") not in signature_ids):
+                        issues.append("journal remote observation references unknown signatureId")
+                if isinstance(manifest.get("dedup"), dict):
+                    if manifest["dedup"].get("eventsWritten") != event_count:
+                        issues.append("manifest dedup.eventsWritten differs from journal rows")
+                    if manifest["dedup"].get("occurrences") is not None and manifest["dedup"]["occurrences"] != remote_event_count:
+                        issues.append("manifest dedup.occurrences differs from remote observation rows")
+                runtime = manifest.get("runtime")
+                observer = runtime.get("observer", {}) if isinstance(runtime, dict) else {}
+                if isinstance(observer, dict):
+                    if "observedCalls" in observer and observer["observedCalls"] != remote_event_count:
+                        issues.append("observer observedCalls differs from remote observation rows")
+                    if "unresolvedCalls" in observer and observer["unresolvedCalls"] != unresolved_remote_count:
+                        issues.append("observer unresolvedCalls differs from remote observation rows")
+                layout = manifest.get("layout", {})
+                layout_version = layout.get("version", 1) if isinstance(layout, dict) else -1
+                for file in folder.rglob("*"):
+                    if not file.is_file() or file.suffix not in {".json", ".jsonl", ".csv"}:
+                        continue
+                    relative = file.relative_to(folder).as_posix()
+                    if relative == "manifest.json" or relative.startswith(("journal/", "gui/states/")):
+                        continue
+                    location = parse_location(Path(relative), layout_version)
+                    if location is None:
+                        continue
+                    service, capture_pass, _, _, category = location
+                    rows = parse_chunk(file, service, capture_pass, category, issues)
+                    for row in rows:
+                        if not isinstance(row, dict):
+                            continue
+                        sequence = row.get("sequence")
+                        if sequence in global_sequences:
+                            issues.append(f"duplicate global sequence {sequence}")
+                        global_sequences.add(sequence)
+                replay_structure(folder)
+            except (OSError, ValueError, TypeError) as exc:
+                issues.append(f"journal: invalid event stream: {exc}")
+            # Continue into the shared report and ledger checks below.
+            states = None
+        else:
+            states = states_index.get("states") if isinstance(states_index, dict) else None
+        if inspection_version == 1:
+            if states == {}:
+                states = []
+            if not isinstance(states, list):
+                raise ValueError("states must be an array")
+            state_paths, state_ids = set(), set()
+            for state in states:
+                try:
+                    if not isinstance(state, dict):
+                        raise ValueError("state entry must be an object")
+                    state_id, path = state.get("stateId"), state.get("path")
+                    if not isinstance(state_id, int) or isinstance(state_id, bool) or state_id < 1:
+                        raise ValueError("invalid stateId")
+                    if path != f"gui/states/state{state_id:06d}.json" or state_id in state_ids:
+                        raise ValueError("invalid or duplicate state path/ID")
+                    state_ids.add(state_id); state_paths.add(path)
+                    projection = json.loads(safe_file(folder, path).read_text(encoding="utf-8"))
+                    elements = projection.get("elements") if isinstance(projection, dict) else None
+                    if elements == {}:
+                        elements = []
+                    if (not isinstance(projection, dict) or projection.get("stateId") != state_id
+                            or not isinstance(elements, list) or state.get("elementCount") != len(elements)):
+                        raise ValueError("state projection differs from index")
+                except (OSError, ValueError, TypeError) as exc:
+                    issues.append(f"gui/states/index.json: {exc}")
+            for file in (folder / "gui/states").glob("state*.json"):
+                if file.relative_to(folder).as_posix() not in state_paths:
+                    issues.append(f"{file.relative_to(folder)}: unindexed GUI state")
     except (OSError, ValueError, TypeError) as exc:
         issues.append(f"gui/states/index.json: invalid state index: {exc}")
 
@@ -295,6 +497,8 @@ def validate_inspection(folder: Path, manifest: dict, issues: list[str]) -> None
                 file = safe_file(folder, relative)
                 if relative in LEDGER_EXCLUDED:
                     raise ValueError("self-referential or report artifact in ledger")
+                if inspection_version == 2 and relative.startswith("checkpoints/"):
+                    raise ValueError("checkpoint snapshots are excluded from the artifact ledger")
                 folded = relative.casefold()
                 if folded in recorded:
                     raise ValueError("duplicate artifact path")
@@ -314,6 +518,8 @@ def validate_inspection(folder: Path, manifest: dict, issues: list[str]) -> None
         for file in folder.rglob("*"):
             if file.is_file():
                 relative = file.relative_to(folder).as_posix()
+                if inspection_version == 2 and relative.startswith("checkpoints/"):
+                    continue
                 if relative not in LEDGER_EXCLUDED and relative.casefold() not in recorded:
                     issues.append(f"{relative}: missing from artifact ledger")
     except (OSError, ValueError, TypeError) as exc:
@@ -329,6 +535,12 @@ def validate_inspection(folder: Path, manifest: dict, issues: list[str]) -> None
         for field in ("status", "game", "stats", "partialReasons"):
             if report.get(field) != manifest.get(field):
                 issues.append(f"report {field} differs from manifest")
+        if inspection_version == 2:
+            expected_dedup = manifest.get("dedup", manifest.get("continuous", {}))
+            if report.get("dedup") != expected_dedup:
+                issues.append("report dedup counters differ from manifest")
+            if "continuous" in manifest and report.get("continuous") != manifest.get("continuous"):
+                issues.append("report continuous counters differ from manifest")
         script_stats = manifest.get("scriptExport", {}).get("stats") if isinstance(manifest.get("scriptExport"), dict) else None
         report_scripts = report.get("scriptExport")
         if not isinstance(report_scripts, dict) or report_scripts.get("stats") != script_stats:
@@ -406,19 +618,24 @@ def validate_folder(folder: Path) -> list[str]:
             issues.append(f"{location}: duplicate global sequence")
         else:
             seen_sequences.add(seq)
-    sidecars = {"scripts/index.json", "remotes/index.json", "gui/index.json",
+    sidecars = {"scripts/index.json", "remotes/index.json", "remotes/signatures.json", "gui/index.json",
                 "gui/actions.jsonl", "remotes/observations.jsonl", "report.json",
-                "scripts/progress.jsonl", "performance-local.json"}
+                "scripts/progress.jsonl", "performance-local.json", "journal/index.json"}
     if inspection:
         sidecars |= INSPECTION_SIDECARS
+    declared_v09_paths = (declared_v09_auxiliary_paths(folder, issues)
+                          if manifest.get("inspectionVersion") == 2 else set())
     for file in folder.rglob("*"):
         if not file.is_file() or file == manifest_path:
             continue
         if file.suffix not in {".json", ".jsonl", ".csv"}:
             continue
         relative = file.relative_to(folder).as_posix()
+        if inspection and manifest.get("inspectionVersion") == 2 and relative.startswith("checkpoints/"):
+            continue
         is_gui_state = inspection and re.fullmatch(r"gui/states/state[0-9]{6,}\.json", relative)
-        if ("scriptExport" in manifest or inspection) and (relative in sidecars or is_gui_state):
+        if (("scriptExport" in manifest or inspection)
+                and (relative in sidecars or is_gui_state or relative in declared_v09_paths)):
             try:
                 if file.suffix == ".json":
                     json.loads(file.read_text(encoding="utf-8"))
@@ -543,6 +760,39 @@ def validate_folder(folder: Path) -> list[str]:
     if inspection:
         validate_inspection(folder, manifest, issues)
     return issues
+
+
+def declared_v09_auxiliary_paths(folder: Path, issues: list[str]) -> set[str]:
+    """Return only journal/GUI lookup files authorized by their v0.9 indexes."""
+    declared: set[str] = set()
+    try:
+        index = json.loads((folder / "journal/index.json").read_text(encoding="utf-8"))
+        if not isinstance(index, dict) or index.get("version") != 1:
+            raise ValueError("journal index must use version 1")
+        streams = index.get("streams")
+        if not isinstance(streams, dict):
+            raise ValueError("journal index streams must be an object")
+        for stream_name, stream in streams.items():
+            if not isinstance(stream_name, str) or not re.fullmatch(r"[A-Za-z0-9_-]+", stream_name):
+                raise ValueError("invalid journal stream name")
+            if not isinstance(stream, dict) or not isinstance(stream.get("segments"), list):
+                raise ValueError(f"invalid journal stream {stream_name}")
+            for segment in stream["segments"]:
+                if not isinstance(segment, dict) or not isinstance(segment.get("path"), str):
+                    raise ValueError(f"invalid journal segment in {stream_name}")
+                path = segment["path"]
+                if not re.fullmatch(rf"journal/{re.escape(stream_name)}/b[0-9]{{6}}\.json", path):
+                    raise ValueError(f"invalid journal segment path: {path}")
+                safe_file(folder, path)
+                declared.add(path)
+    except (OSError, ValueError, TypeError) as exc:
+        issues.append(f"journal/index.json: {exc}")
+    try:
+        from reconstruct_export import indexed_gui_lookup_paths
+        declared.update(indexed_gui_lookup_paths(folder))
+    except (OSError, ValueError, TypeError) as exc:
+        issues.append(f"gui/states/lookup: {exc}")
+    return declared
 
 
 def main() -> int:

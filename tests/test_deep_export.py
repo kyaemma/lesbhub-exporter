@@ -59,6 +59,55 @@ class DeepExportTests(unittest.TestCase):
             self.fixture(folder, b"-- synthetic long line\r\n" * 4000 + b"return 42\n")
             self.assertEqual(validate_folder(folder), [])
 
+    def test_v09_script_contents_can_be_shared_between_logical_entries(self):
+        with tempfile.TemporaryDirectory() as directory:
+            folder = Path(directory)
+            self.fixture(folder)
+            index_path = folder / "scripts/index.json"
+            index = json.loads(index_path.read_text(encoding="utf-8"))
+            first = index["scripts"][0]
+            second = dict(first, scriptId="s2", instanceId=2, robloxPath="PlayerGui/OtherController")
+            index["scripts"].append(second)
+            index["version"] = 2
+            source = (folder / first["outputPath"]).read_bytes()[first["headerByteLength"]:]
+            (folder / first["outputPath"]).write_bytes(source)
+            for entry in index["scripts"]:
+                entry.update(headerByteLength=0, fileByteLength=len(source),
+                             fileChecksum=hashlib.sha256(source).hexdigest())
+            stats = index["stats"]
+            stats.update(discovered=2, attempted=2, succeeded=2, files=1,
+                         bytes=len(source), logicalFiles=2,
+                         logicalBytes=2 * first["byteLength"], sharedReferences=1)
+            index_path.write_text(json.dumps(index), encoding="utf-8")
+            manifest_path = folder / "manifest.json"
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            manifest["scriptExport"].update(version=2, stats=stats)
+            manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+            self.assertEqual(validate_folder(folder), [])
+
+    def test_v09_resumed_index_retains_verified_legacy_header(self):
+        with tempfile.TemporaryDirectory() as directory:
+            folder = Path(directory)
+            file, index = self.fixture(folder)
+            first = index["scripts"][0]
+            source = file.read_bytes()[first["headerByteLength"]:]
+            output = f"scripts/sources/content/sha256-{first['checksum']}-{len(source)}.luau"
+            target = folder / output; target.parent.mkdir(parents=True); target.write_bytes(source)
+            second = dict(first, scriptId="s2", instanceId=2, outputPath=output,
+                          headerByteLength=0, fileByteLength=len(source), fileChecksum=first["checksum"])
+            index["scripts"].append(second); index["version"] = 2
+            total = first["fileByteLength"] + len(source)
+            index["stats"].update(discovered=2, attempted=2, succeeded=2, files=2, bytes=total,
+                                  logicalFiles=2, logicalBytes=total, sharedReferences=0)
+            (folder / "scripts/index.json").write_text(json.dumps(index), encoding="utf-8")
+            path = folder / "manifest.json"; manifest=json.loads(path.read_text(encoding="utf-8"))
+            manifest["scriptExport"].update(version=2, stats=index["stats"])
+            path.write_text(json.dumps(manifest), encoding="utf-8")
+            self.assertEqual(validate_folder(folder), [])
+            second["instanceId"] = first["instanceId"]
+            (folder / "scripts/index.json").write_text(json.dumps(index), encoding="utf-8")
+            self.assertTrue(any("duplicate instanceId" in issue for issue in validate_folder(folder)))
+
     def test_partial_code_can_be_preserved(self):
         with tempfile.TemporaryDirectory() as directory:
             folder = Path(directory)

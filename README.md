@@ -183,3 +183,13 @@ MIT License. See [LICENSE](LICENSE).
 - `scripts/probe_continuous.luau` creates and removes only its own client-local fixture. It does not activate existing game buttons or invoke a server remote.
 
 The shipped bundle performs discovery, reconstruction and file writes autonomously. MCP is used only during development. Keep generated captures outside this public repository.
+
+## Continuous capture v0.9 format contract
+
+[English data and recovery guide](docs/continuous-v09.md) · [Guide en français](docs/continuous-v09.fr.md).
+
+The v0.9 format keeps the full metadata baseline and records later structural changes as ordered `add`, `update` and `remove` rows keyed by capture-local `instanceId`. Paths and names remain descriptive fields; duplicate paths do not merge distinct instances. GUI state files use a baseline projection followed by `baseStateId`, `upserts` and `removes`, so each distinct projection is stored once while observed transitions retain their chronology.
+
+Append-only event streams are stored in immutable batches under `journal/`; `journal/index.json` declares each stream's segments, event count and sequence range. Sequence numbers are global across metadata and event rows. Remote signatures are stored separately from occurrences, so repeated calls stay individually countable. Script source files may be shared by multiple logical script entries only when their verified bytes match. The validator keeps the v0.5-v0.8 formats intact and applies the new reconstruction checks only to `inspectionVersion: 2` exports.
+
+Automated fixtures verify independent replay, repeated GUI transitions and remote occurrences, legacy validation, queue pressure and damaged-history detection. [Live validation and release evidence](docs/continuous-v09-validation.md) distinguishes completed Roblox measurements, interrupted candidates, synthetic tests and the final release gate.
