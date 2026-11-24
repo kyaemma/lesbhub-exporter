@@ -331,3 +331,65 @@ CI compiles the modules and generated bundle, then runs capture, writer, UI,
 Cobalt, budget, analysis, GUI, runtime, relation, report, resume, search and
 cancellation mocks with the official Luau CLI. These tests do not
 establish behavior for every game, executor, Cobalt configuration or unvisited UI.
+
+
+## Final publication gate - full UI bundle, 2026-11-24
+
+The exact final PR #3 bundle was loaded byte-for-byte into the existing Roblox
+client, then started through the actual **Full export + GUI** button and its
+confirmation. No capture settings or data limits were overridden by the test.
+The Max preset retained all targets, reconstructed sources, GUI properties,
+attributes/tags, four guided GUI passes with seven-second waits, and the
+six-second passive runtime window. Capture took **205.6645 seconds** (3 min 26 s).
+Exhaustiveness and integrity take precedence over speed for this release.
+
+Tested bundle: 268,948 bytes, SHA-256
+`25f280c2d16bf4832e44d0c5efa637294f23e70605a038d2b9c849c826f5e543`.
+The client remained on the same place/universe/version as the earlier tests;
+live contents had changed during the intervening session, so counts are not a
+controlled comparison with the earlier 714-file candidate.
+
+| Publication check | Result |
+|---|---|
+| Script objects / attempts | 974 / 974 |
+| Verified reconstructed files | 691: 603 ModuleScripts and 88 LocalScripts |
+| Empty / failed / partial / inaccessible / pending | 283 / 0 / 0 / 0 / 0 |
+| Official CLI source compilation | 691/691 passed |
+| Metadata / unique Instance IDs | 159,484 records / 148,745 IDs |
+| Metadata chunks / bytes | 1,360 / 102,150,968 |
+| Observed remote/bindable inventory | 1,193, including explicit removal state |
+| Genuine Cobalt observations | 2,447 incoming, zero outgoing in this interval |
+| GUI states / transitions | 19 / 18 |
+| Temporal associations | 59, explicitly noncausal |
+| Artifact ledger | 2,365 files, 172,558,565 bytes |
+| Independent dataset validator | Passed |
+
+The extra acceptance audit cross-checked script, GUI, remote and asset IDs against
+metadata; current index sequences and remote removal flags; observation totals
+against per-remote counts; temporal edge references against real GUI/remote log
+sequences; report counts against the manifest; and the eight report layers in the
+readable report. Every successful reconstructed file was compiled with the
+separate official Luau CLI. The dataset validator re-read all ledger artifacts
+and verified their sizes/checksums, source checksums, global sequences, GUI state
+files and report consistency.
+
+Test instrumentation observed one actual Cobalt adapter subscription and one
+cleanup, with zero active subscriptions after completion. Counts returned to
+their initial values on all 26 watched signals, covering selected roots'
+DescendantAdded/DescendantRemoving, PlayerAdded, the local CharacterAdded and the
+controlled fixture buttons. Observation logs and the script index remained
+unchanged in a three-second post-stop check. The fixture was then absent. Its
+own handlers exercised local GUI states; the one activation was a synthetic
+signal on our own button, not a human game action or a causal network proof.
+The measurement wrappers did not alter capture options or saved data and are
+not runtime dependencies.
+
+The manifest truthfully remains **partial**: 283 decompiler outputs were empty,
+and 21 metadata encoding/property recoveries were reported. No source was counted
+as successful without verified bytes and compilation. These are documented
+client/decompiler and serialization limits, not an integrity-check failure.
+No third-party sources or private capture files from this gate are published.
+
+Local release checks also passed: deterministic bundle, 29 Python tests,
+13 Luau mock suites, source/bundle/plugin compilation, and git diff --check.
+The exact same bundle bytes are required for the main distribution verification.
