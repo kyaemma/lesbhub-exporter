@@ -641,7 +641,7 @@ local function normalizedConfig(input)
     cfg.assets = input.assets ~= false
     cfg.includeAttributes = input.includeAttributes ~= false
     cfg.includeTags = input.includeTags ~= false
-    cfg.includeReconstructedCode = input.includeReconstructedCode == true
+    cfg.includeReconstructedCode = input.includeReconstructedCode ~= false
     cfg.observeGuiActions = input.observeGuiActions == true
     cfg.observeRemotes = input.observeRemotes == true
     cfg.textboxValues = input.textboxValues == true
