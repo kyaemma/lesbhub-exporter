@@ -368,5 +368,67 @@ assert(flatFiles == flat.manifest.stats.files)
 assert(flat.manifest.stats.written == flat.manifest.stats.visited)
 print("Luau categorized layout OK: UI scripts, categorized files, flat compatibility")
 
+-- v0.7: event identity must survive duplicate names, renames, same-path
+-- replacement and objects that disappear before the baseline can visit them.
+local function eventSignal()
+    local callbacks = {}
+    return {
+        Connect = function(_, callback)
+            callbacks[callback] = true
+            return {Disconnect = function() callbacks[callback] = nil end}
+        end,
+        Fire = function(_, obj) for callback in pairs(callbacks) do callback(obj) end end,
+        Count = function() local n = 0; for _ in pairs(callbacks) do n = n + 1 end; return n end,
+    }
+end
+gui.DescendantAdded, gui.DescendantRemoving = eventSignal(), eventSignal()
+local a = instance("Same", "NumberValue", {Value = 1})
+local b = instance("Same", "NumberValue", {Value = 2})
+a.Parent, b.Parent = gui, gui
+gui._children = {a, b}
+local replacement = instance("Same", "NumberValue", {Value = 4})
+replacement.Parent = gui
+local stopIdentity = {}
+local timeline, timelineError = Exporter.capture({label = "IdentityFixture",
+    targets = {PlayerGui = true}, continuous = true}, function(info)
+    if info.stage == "service_start" and info.pass == 1 then
+        local short = instance("Transient", "NumberValue", {Value = 17})
+        short.Parent = gui
+        gui.DescendantAdded:Fire(short)
+        gui.DescendantRemoving:Fire(short)
+        short.Parent = nil
+    elseif info.stage == "monitoring_start" then
+        a.Name = "Renamed"; a.Value = 3
+        gui.DescendantRemoving:Fire(b)
+        gui._children = {a, replacement}
+        gui.DescendantAdded:Fire(replacement)
+        stopIdentity.stopRequested = true
+    end
+end, stopIdentity)
+assert(timeline, timelineError)
+assert(gui.DescendantAdded:Count() == 0 and gui.DescendantRemoving:Count() == 0, "event listeners leaked")
+local sequence, sameIds, shortOps = {}, {}, {}
+local renamedId, originalId
+for filename, chunk in pairs(writes) do
+    if filename:find(timeline.folder, 1, true) and type(chunk) == "table" then
+        for _, record in ipairs(chunk.records or {}) do
+            assert(not sequence[record.sequence], "duplicate global sequence")
+            sequence[record.sequence] = true
+            if record.name == "Transient" then shortOps[record.operation] = record end
+            if record.name == "Same" then
+                sameIds[record.instanceId] = true
+                if record.properties.Value == 1 then originalId = record.instanceId end
+            elseif record.name == "Renamed" then renamedId = record.instanceId end
+        end
+    end
+end
+local sameCount = 0; for _ in pairs(sameIds) do sameCount = sameCount + 1 end
+assert(sameCount == 3, "same names or same-path replacement conflated")
+assert(renamedId == originalId, "rename changed Instance identity")
+assert(shortOps.add and shortOps.remove and shortOps.add.sequence < shortOps.remove.sequence,
+    "transient event disappeared during baseline")
+assert(shortOps.add.properties.Value == 17, "transient properties read too late")
+print("Luau identity OK: duplicate names, rename, replacement, short events, global order and cleanup")
+
 
 

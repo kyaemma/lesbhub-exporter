@@ -29,7 +29,7 @@ Inside Cobalt's **Plugins → Lesbhub Remote Observer** settings:
 
 Output directory: `LesbhubExporter/cobalt-observations/cobalt-<timestamp>-<suffix>.json`.
 
-It is **not** written into a currently running Lesbhub export directory, so it cannot conflict with the exporter's manifest or chunk indexes. A later analyzer can join summaries to structural exports using the game IDs, observation window, remote class and normalized path.
+The standalone summary stays outside capture chunks. In v0.7, enabling **Accept optional Cobalt observations** on the exporter also accepts observations from the separately started plugin into `remotes/observations.jsonl` in the active capture. The bridge uses the capture's global sequence and exact Instance identity, and links a known caller only when documented `info.Origin` is an actual known Instance. Similar names, paths or time windows alone do not establish a causal link. No raw arguments are saved.
 
 ## What is collected
 
@@ -82,3 +82,11 @@ A complete Cobalt log may contain sensitive values; **do not confuse it with thi
 Keeping these tools separate makes the standard client hierarchy exporter lightweight, read-only and portable across executors. There is no dependence on Cobalt's hook methods, no automatic network monitoring, and no accidental mixture of observed calls with static object properties.
 
 **Reference:** [GitLab project](https://gitlab.com/upio/cobalt), [Cobalt README](https://gitlab.com/upio/cobalt/-/raw/main/README.md) and [plugin API](https://docs.mspaint.cc/cobalt/plugins/api). The Lesbhub plugin is original code written against the documented API, not a vendored copy of Cobalt.
+
+
+## v0.7 validation boundary
+
+The plugin and bridge protocol have mock coverage. A live client-local synthetic
+fixture validates ordered bridge records, caller identity and exclusion of payload
+values. Actual Cobalt incoming/outgoing traffic was not part of that synthetic
+fixture and remains separately unverified. See [the evidence report](deep-export-validation.md).

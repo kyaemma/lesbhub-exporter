@@ -1,6 +1,8 @@
-# V1 live test plan (manual; results pending)
+# Exporter acceptance plan and historical live results
 
-Potassium live results (modded Criminality variant, 2026-11-23): GUI-only capture completed with 28,418 objects and 7,173 asset references in 3.17 seconds. The next full-client export was partial at 14,000 visited, 13,800 written, with `json_encode_failed:ReplicatedStorage`. V0.2.1 added encoding recovery. Later screenshots show 223.7K records, 44.7K asset references and a 60.3-second run (partial status; cause needs manifest review). The v0.5 continuous monitoring mode still needs live Potassium validation. The following scenarios are the acceptance suite.
+For completed v0.7 code extraction and controlled continuous tests, see [Deep Export validation](deep-export-validation.md). The notes below include historical results; they are not a claim that every scenario has been retested live.
+
+Potassium live results (modded Criminality variant, 2026-11-23): GUI-only capture completed with 28,418 objects and 7,173 asset references in 3.17 seconds. The next full-client export was partial at 14,000 visited, 13,800 written, with `json_encode_failed:ReplicatedStorage`. V0.2.1 added encoding recovery. Later screenshots show 223.7K records, 44.7K asset references and a 60.3-second run (partial status; cause needs manifest review). The original v0.5 continuous mode had not been live-validated at that time; v0.7 now has a controlled local live fixture. The following scenarios are the acceptance suite.
 
 | ID | Scenario | Expected result |
 |---|---|---|
@@ -39,7 +41,7 @@ Potassium live results (modded Criminality variant, 2026-11-23): GUI-only captur
 | E33 | Home shortcuts | Full/GUI/Map, log and settings navigation available |
 | E34 | Map capture | floating log opens automatically and remains accessible |
 | E35 | WindUI modal button layout | long button labels stack within dialog, never overflow |
-| E36 | Native saveinstance() | any "Decompiling scripts" progress belongs to executor-native save, not JSON export |
+| E36 | Native saveinstance() | native saving remains separate; standard captures reconstruct code only with the explicit v0.7 opt-in |
 | E37 | Continuous capture on unrelated game | no hardcoded names or menu assumptions; starts with initial snapshot |
 | E38 | Open new client menu during monitoring | new GUI nodes appear in delta files with `operation=add` |
 | E39 | Modify existing GUI Text/Visible | subsequent delta has `operation=update`; unchanged records omitted |
@@ -65,3 +67,13 @@ For each run record: executor version, client FPS before/during/after, duration,
 | E55 | Attributes and tags | client-visible GetAttributes/GetTags values collected, sensitive keys filtered |
 | E56 | Optional Cobalt plugin | OFF by default, explicit start/stop, only coarse type signatures and counts |
 | E57 | Cobalt integration unload | interceptor cleanup occurs; no replay, blocking, raw arguments or uploads |
+
+
+| E58 | Reconstructed client code opt-in | real `.luau`, protected decompile, exact readback and syntax check, never execute returned code |
+| E59 | >2000 lines / large source | no artificial text cap; source checksum matches returned bytes |
+| E60 | Empty/failed/unavailable decompile | truthful per-script status, no placeholder code files |
+| E61 | File integrity / cancellation | no false success; partial writes and cancellation are reported |
+| E62 | Resume in same executor session | verified files skipped; class/DebugId checked before retry |
+| E63 | Instance identity / short events | distinct homonyms/replacements, stable rename ID, events retained before baseline visit |
+| E64 | Global sequence / diagnostics | unique order across chunks, operator activations and optional Cobalt records |
+| E65 | Public repository hygiene | no private game source, capture files, payloads or user identities committed |

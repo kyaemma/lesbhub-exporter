@@ -25,6 +25,22 @@ local PRESETS = {
 -- All visible strings are routed through this dictionary. Names of Roblox
 -- services, export fields and file paths are deliberately never translated.
 local WORDS = {
+    deep_code = {"Include reconstructed client script code", "Inclure le code reconstruit des scripts clients"},
+    deep_code_desc = {"Write verified .luau files with a script index. Requires decompile; private local output only.",
+        "Écrire des fichiers .luau vérifiés et leur index. Nécessite decompile ; sortie locale privée."},
+    deep_result = {"Reconstructed scripts: %d saved, %d partial, %d failed/inaccessible. Index: %s",
+        "Scripts reconstruits : %d sauvés, %d partiels, %d échoués/inaccessibles. Index : %s"},
+    copy_report = {"Copy latest export report", "Copier le dernier rapport d'export"},
+    search_index = {"Search latest scripts / remotes / GUI", "Rechercher dans les scripts / remotes / GUI"},
+    search_index_desc = {"Type a name or path; matches are written to the activity journal.",
+        "Saisir un nom ou chemin ; les résultats apparaissent dans le journal."},
+    search_button = {"Search indexes", "Rechercher dans les index"},
+    gui_actions = {"Observe GUI activations", "Observer les activations GUI"},
+    gui_actions_desc = {"Record operator button activations during capture; never clicks automatically.",
+        "Enregistrer les activations de boutons pendant la capture ; aucun clic automatique."},
+    remote_observation = {"Accept optional Cobalt observations", "Accepter les observations Cobalt optionnelles"},
+    remote_observation_desc = {"Requires the separately enabled observer plugin. Captures types, never argument values.",
+        "Nécessite le plugin d'observation activé séparément. Types uniquement, sans valeurs d'arguments."},
     home = {"Home", "Accueil"}, dataset = {"Dataset", "Données"},
     targets = {"Targets", "Cibles"}, options = {"Options", "Options"},
     capture = {"Capture", "Capture"}, map = {"Map", "Carte"},
@@ -82,8 +98,8 @@ local WORDS = {
     output_layout = {"File organization", "Organisation des fichiers"},
     layout_categorized = {"Categorized folders", "Dossiers classés par type"},
     layout_flat = {"Flat (legacy)", "À plat (ancien format)"},
-    layout_desc = {"Groups instances by type and Roblox service. Script records are metadata only.",
-        "Classe les objets par type puis par service Roblox. Les scripts restent des métadonnées, sans code source."},
+    layout_desc = {"Groups metadata by type and service. Reconstructed code is a separate opt-in.",
+        "Classe les métadonnées par type et service. Le code reconstruit est une option séparée."},
     target_intro = {"Roblox services", "Services Roblox"},
     target_desc = {"All available targets are selected by default. Search and select several in one menu.",
         "Toutes les cibles sont sélectionnées par défaut. Recherche et sélectionne plusieurs services dans un seul menu."},
@@ -495,9 +511,11 @@ function UI.open(Engine, restore)
     if config.organizedOutput == nil then config.organizedOutput = true end
     if config.includeAttributes == nil then config.includeAttributes = true end
     if config.includeTags == nil then config.includeTags = true end
+    if config.includeReconstructedCode == nil then config.includeReconstructedCode = false end
     local presetKey = restore.preset or "max"
     local running, control, destroyed, nativeBusy = false, nil, false, false
     local runningMode = nil
+    local latestFolder, searchQuery = nil, ""
 
     local Window = windui:CreateWindow({
         Title = "Lesbhub Exporter", Folder = "lesbhub-exporter", Icon = "database",
@@ -691,6 +709,9 @@ function UI.open(Engine, restore)
     addToggle("assets", "assets", "assets_desc")
     addToggle("includeAttributes", "attributes", "attributes_desc")
     addToggle("includeTags", "tags", "tags_desc")
+    addToggle("includeReconstructedCode", "deep_code", "deep_code_desc")
+    addToggle("observeGuiActions", "gui_actions", "gui_actions_desc")
+    addToggle("observeRemotes", "remote_observation", "remote_observation_desc")
     addToggle("textboxValues", "textbox", "textbox_desc")
     addToggle("stringValues", "stringvalue", "stringvalue_desc")
     addToggle("twoPassGui", "gui_passes_enabled", "gui_passes_desc")
@@ -721,6 +742,22 @@ function UI.open(Engine, restore)
     capture:Paragraph({Title = t("action_group"), Desc = t("continuous_help")})
     local captureStatus = capture:Paragraph({Title = t("ready"), Desc = t("ready_desc")})
     captureSummary = capture:Paragraph({Title = t("last_export"), Desc = t("no_export")})
+    capture:Input({Title = t("search_index"), Desc = t("search_index_desc"), Value = "",
+        Callback = function(value) searchQuery = tostring(value) end})
+    capture:Button({Title = t("search_button"), Icon = "search", Callback = function()
+        if not latestFolder or running then return end
+        local matches, reason = Engine.search(latestFolder, searchQuery)
+        local lines = {reason or ""}
+        for _, row in ipairs(matches or {}) do
+            lines[#lines + 1] = row.kind .. " | " .. row.robloxPath .. " | " .. (row.outputPath or row.status or "")
+        end
+        journal.setText(table.concat(lines, "\n")); journal.show()
+    end})
+    capture:Button({Title = t("copy_report"), Icon = "copy", Callback = function()
+        if not latestFolder or type(readfile) ~= "function" then return end
+        local ok, text = pcall(readfile, latestFolder .. "/report.md")
+        if ok and type(setclipboard) == "function" then pcall(setclipboard, text) end
+    end})
     capture:Button({
         Title = t("full"), Icon = "download",
         Color = Color3.fromRGB(48, 109, 204), Size = "Large",
@@ -955,6 +992,7 @@ function UI.open(Engine, restore)
                 alert(t("export_failed"), reason)
             else
                 local manifest = result.manifest
+                latestFolder = result.folder
                 local statusLabel = t(manifest.status == "complete" and "completed"
                     or manifest.status == "stopped" and "stopped"
                     or manifest.status == "cancelled" and "cancelled_status" or "partial")
@@ -964,6 +1002,12 @@ function UI.open(Engine, restore)
                 if manifest.settings and manifest.settings.continuous then
                     summary = summary .. "  |  " .. t("monitor_deltas") .. ": "
                         .. shortCount(manifest.stats.deltaRecords or 0)
+                end
+                if manifest.scriptExport and manifest.scriptExport.enabled then
+                    local scripts = manifest.scriptExport.stats
+                    summary = summary .. "\n" .. tf("deep_result", scripts.succeeded,
+                        scripts.partial, scripts.failed + scripts.inaccessible + scripts.empty,
+                        result.folder .. "/scripts/index.json")
                 end
                 event(tf("event_end", summary))
                 if type(manifest.partialReasons) == "table" and #manifest.partialReasons > 0 then

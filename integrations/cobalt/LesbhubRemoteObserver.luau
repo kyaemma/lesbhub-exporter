@@ -5,7 +5,7 @@ Cobalt.PluginData = {
     Name = "Lesbhub Remote Observer",
     Description = "Summarizes observed incoming/outgoing remotes as local metadata",
     Author = "Lesbhub",
-    Version = "0.1.0",
+    Version = "0.2.0",
     Game = "*",
 }
 
@@ -239,6 +239,12 @@ local function start()
     local ok, cleanup = pcall(function()
         return Cobalt.Spy:InterceptExecutedCalls("All", function(info, instance, direction)
             pcall(observe, info, instance, direction)
+            -- Optional v0.7 capture bridge: exact Instance refs and documented
+            -- info.Origin, never a name-based guess or a replayed call.
+            local env = (type(getgenv) == "function" and getgenv()) or _G
+            if type(env.LesbhubExporterObserveRemote) == "function" then
+                pcall(env.LesbhubExporterObserveRemote, info, instance, direction)
+            end
             -- No return value. Let Cobalt and the game behave normally.
         end)
     end)

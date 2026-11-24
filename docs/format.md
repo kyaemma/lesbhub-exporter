@@ -53,7 +53,7 @@ Each line is exactly one JSON object with the record schema. There is no top-lev
 
 ### CSV
 
-Header: `path,parentPath,name,className,depth,properties_json`. The `properties_json` column contains a **JSON-encoded object** safely CSV-quoted. Each chunk has its own header. In categorized CSV/JSONL, the category is inferred from the folder name; JSON includes `category` in the chunk header, and JSON/JSONL records also carry it.
+Historical header: `path,parentPath,name,className,depth,properties_json`. V0.7 appends `instanceId,parentInstanceId,sequence,scriptId,operation,observedAtUtc`; the validator accepts both headers. The `properties_json` column contains a **JSON-encoded object** safely CSV-quoted. Each chunk has its own header. In categorized CSV/JSONL, the category is inferred from the folder name; JSON includes `category` in the chunk header, and JSON/JSONL records also carry it.
 
 ## Manifest
 
@@ -174,3 +174,14 @@ A `RemoteEvent` record may contain:
 `RemoteInfo` describes the Roblox **class**, not the game's actual usage, server-side handlers, call direction, or arguments. The main exporter **never invokes or spies on remotes**.
 
 For optional call **observations** rather than class capabilities, see [Cobalt integration](cobalt-integration.md). Its local JSON summary is a separate dataset and intentionally stores *only* call counts, observed direction and argument types; it cannot reconstruct payload values.
+
+
+## Deep Export v0.7 extension
+
+See [the complete contract and migration plan](deep-export.md). Original metadata
+chunk counts remain unchanged in meaning. Optional reconstructed `.luau` files and
+readable script/remote/GUI indexes are separate sidecars, with `scriptExport` totals
+in the manifest. Original `Script.Source` is never serialized into metadata.
+Capture-local identity and global sequence are additive fields; paths/pass numbers
+are insufficient for replay. Sidecars and files are validated by the updated
+`scripts/validate_export.py`.

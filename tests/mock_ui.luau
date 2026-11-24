@@ -181,6 +181,7 @@ function engine.capture(cfg, onProgress, control)
             visited = 8, discovered = 11, written = 8, pending = 3,
             files = 1, assetReferences = 3, elapsedSeconds = 1.0,
             monitoring = true, monitorCycles = 0, deltaRecords = 0})
+        lastWindow.tabs.Capture:find("Button", "Stop & Save").config.Callback()
         assert(control.stopRequested == true,
             "Stop & Save button must request graceful monitoring termination")
         onProgress({stage = "monitoring_finalizing", service = "PlayerGui", pass = 2,
