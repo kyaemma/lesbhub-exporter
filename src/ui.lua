@@ -7,17 +7,17 @@ local LANGUAGE_FILE = "LesbhubExporter/language.txt"
 local PRESETS = {
     max = {guiTexts = true, guiProperties = true, worldProperties = true, assets = true,
         textboxValues = true, stringValues = true,
-        includeAttributes = true, includeTags = true, twoPassGui = true,
+        includeAttributes = true, includeTags = true, includeReconstructedCode = true, twoPassGui = true,
         guiPasses = 4, secondPassDelay = 7, continuousInterval = 3,
         yieldEvery = 45, chunkSize = 200},
     smart = {guiTexts = true, guiProperties = true, worldProperties = true, assets = true,
         textboxValues = true, stringValues = true,
-        includeAttributes = true, includeTags = true, twoPassGui = true,
+        includeAttributes = true, includeTags = true, includeReconstructedCode = true, twoPassGui = true,
         guiPasses = 3, secondPassDelay = 6, continuousInterval = 4,
         yieldEvery = 80, chunkSize = 300},
     fast = {guiTexts = true, guiProperties = false, worldProperties = false, assets = true,
         textboxValues = true, stringValues = true,
-        includeAttributes = true, includeTags = true, twoPassGui = true,
+        includeAttributes = true, includeTags = true, includeReconstructedCode = true, twoPassGui = true,
         guiPasses = 2, secondPassDelay = 3, continuousInterval = 6,
         yieldEvery = 140, chunkSize = 500},
 }
@@ -26,8 +26,10 @@ local PRESETS = {
 -- services, export fields and file paths are deliberately never translated.
 local WORDS = {
     deep_code = {"Include reconstructed client script code", "Inclure le code reconstruit des scripts clients"},
-    deep_code_desc = {"Write verified .luau files with a script index. Requires decompile; private local output only.",
-        "Écrire des fichiers .luau vérifiés et leur index. Nécessite decompile ; sortie locale privée."},
+    deep_code_desc = {"Enabled by default: writes verified .luau files and a script index; disable for metadata-only exports.",
+        "Activé par défaut : écrit les fichiers .luau et un index ; désactivable pour exporter seulement les métadonnées."},
+    deep_code_notice = {"Reconstructed client scripts (.luau) will be saved locally if supported. They may differ from original sources.",
+        "Les scripts clients reconstruits (.luau) seront enregistrés localement si disponibles. Ils peuvent différer des sources originales."},
     deep_result = {"Reconstructed scripts: %d saved, %d partial, %d failed/inaccessible. Index: %s",
         "Scripts reconstruits : %d sauvés, %d partiels, %d échoués/inaccessibles. Index : %s"},
     copy_report = {"Copy latest export report", "Copier le dernier rapport d'export"},
@@ -77,8 +79,8 @@ local WORDS = {
     home_no_capture = {"No capture yet", "Aucune capture effectuée"},
     quick_actions = {"Quick actions", "Raccourcis"},
     full = {"Full export + GUI", "Export complet + GUI"},
-    full_desc = {"All selected structures and guided menu snapshots in one operation.",
-        "Toutes les structures sélectionnées et les menus GUI en une seule opération."},
+    full_desc = {"Structures, GUI snapshots and reconstructed Luau scripts in one operation.",
+        "Structures, captures GUI et scripts Luau reconstruits en une seule opération."},
     quick_gui = {"Capture GUI now", "Capturer la GUI maintenant"},
     quick_gui_desc = {"Take an extra snapshot after manually opening a menu.",
         "Prends une capture supplémentaire après avoir ouvert un menu."},
@@ -98,8 +100,8 @@ local WORDS = {
     output_layout = {"File organization", "Organisation des fichiers"},
     layout_categorized = {"Categorized folders", "Dossiers classés par type"},
     layout_flat = {"Flat (legacy)", "À plat (ancien format)"},
-    layout_desc = {"Groups metadata by type and service. Reconstructed code is a separate opt-in.",
-        "Classe les métadonnées par type et service. Le code reconstruit est une option séparée."},
+    layout_desc = {"Groups metadata by type and service. Reconstructed code is included by default.",
+        "Classe les métadonnées par type et service. Le code reconstruit est inclus par défaut."},
     target_intro = {"Roblox services", "Services Roblox"},
     target_desc = {"All available targets are selected by default. Search and select several in one menu.",
         "Toutes les cibles sont sélectionnées par défaut. Recherche et sélectionne plusieurs services dans un seul menu."},
@@ -155,8 +157,8 @@ local WORDS = {
     unlimited_desc = {"Chunking controls file sizes only; the overall dataset is not capped.",
         "Le découpage limite les fichiers individuels, jamais le volume total exporté."},
     capture_intro = {"One-click capture", "Capture en un clic"},
-    capture_desc = {"Choose a one-time full export or continuous monitoring. The activity window opens for every mode.",
-        "Choisis un export complet ponctuel ou une surveillance continue. Le journal s'ouvre dans chaque mode."},
+    capture_desc = {"Full export includes GUI and reconstructed Luau scripts by default. Continuous monitoring is also available.",
+        "L'export complet inclut les GUI et les scripts Luau reconstruits par défaut. La surveillance continue reste disponible."},
     ready = {"Ready", "Prêt"},
     ready_desc = {"The exact object total is not known before the scan.", "Le nombre final d'objets est inconnu avant le scan."},
     last_export = {"Last export", "Dernier export"},
@@ -511,7 +513,7 @@ function UI.open(Engine, restore)
     if config.organizedOutput == nil then config.organizedOutput = true end
     if config.includeAttributes == nil then config.includeAttributes = true end
     if config.includeTags == nil then config.includeTags = true end
-    if config.includeReconstructedCode == nil then config.includeReconstructedCode = false end
+    if config.includeReconstructedCode == nil then config.includeReconstructedCode = true end
     local presetKey = restore.preset or "max"
     local running, control, destroyed, nativeBusy = false, nil, false, false
     local runningMode = nil
@@ -1038,6 +1040,7 @@ function UI.open(Engine, restore)
             Title = t("confirm_export") .. " • " .. kind, Width = 390,
             Content = t("data_local") .. "\n\n"
                 .. ((config.textboxValues or config.stringValues) and t("data_risk") or t("data_safer"))
+                .. (config.includeReconstructedCode and ("\n\n" .. t("deep_code_notice")) or "")
                 .. "\n\n" .. (mode == "continuous" and (t("continuous_consent") .. "\n\n") or "")
                 .. t("do_not_publish") .. "\n\n" .. t("no_upload"),
             Buttons = {
