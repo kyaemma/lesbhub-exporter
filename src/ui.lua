@@ -34,7 +34,7 @@ local WORDS = {
     deep_code_notice = {"Reconstructed client scripts (.luau) will be saved locally if supported. They may differ from original sources.",
         "Les scripts clients reconstruits (.luau) seront enregistrés localement si disponibles. Ils peuvent différer des sources originales."},
     deep_result = {"Reconstructed scripts: %d saved, %d partial, %d failed/inaccessible/empty. Index: %s",
-        "Scripts reconstruits : %d sauvés, %d partiels, %d échoués/inaccessibles. Index : %s"},
+        "Scripts reconstruits : %d sauvés, %d partiels, %d échoués/inaccessibles/vides. Index : %s"},
     copy_report = {"Copy latest export report", "Copier le dernier rapport d'export"},
     search_index = {"Search latest scripts / remotes / GUI", "Rechercher dans les scripts / remotes / GUI"},
     search_index_desc = {"Type a name or path; matches are written to the activity journal.",
