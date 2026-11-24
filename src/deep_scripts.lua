@@ -5,12 +5,6 @@ local runtime = (type(getgenv) == "function" and getgenv()) or {}
 runtime.LesbhubDeepRuntimeToken = runtime.LesbhubDeepRuntimeToken or tostring(os.clock()) .. tostring({})
 Deep.runtimeToken = runtime.LesbhubDeepRuntimeToken
 
-local function safeSegment(value, maximum)
-    local result = tostring(value or "script"):gsub("[^%w_-]", "_")
-    result = result:sub(1, maximum or 42)
-    return result ~= "" and result or "script"
-end
-
 local function folders(path)
     local current = ""
     for part in path:gmatch("[^/]+") do
@@ -103,20 +97,27 @@ function Deep.new(base, enabled, control, progress, context)
     local function counts()
         local result = {discovered = #self.entries, attempted = 0, succeeded = 0,
             failed = 0, inaccessible = 0, empty = 0, partial = 0, skipped = 0,
-            pending = 0, files = 0, bytes = 0}
+            pending = 0, files = 0, bytes = 0, logicalFiles = 0, logicalBytes = 0, sharedReferences = 0}
+        local paths = {}
         for _, entry in ipairs(self.entries) do
             if entry.attempted then result.attempted = result.attempted + 1 end
             if entry.skipped then result.skipped = result.skipped + 1 end
             if entry.status == "success" then result.succeeded = result.succeeded + 1
             elseif result[entry.status] ~= nil then result[entry.status] = result[entry.status] + 1 end
             if entry.verifiedReadback then
-                result.files = result.files + 1; result.bytes = result.bytes + entry.fileByteLength
+                result.logicalFiles = result.logicalFiles + 1
+                result.logicalBytes = result.logicalBytes + entry.fileByteLength
+                if not paths[entry.outputPath] then
+                    paths[entry.outputPath] = true
+                    result.files = result.files + 1; result.bytes = result.bytes + entry.fileByteLength
+                end
             end
         end
+        result.sharedReferences = result.logicalFiles - result.files
         return result
     end
     function self:summary()
-        return {version = 1, enabled = self.enabled, indexPath = self.indexPath,
+        return {version = 2, enabled = self.enabled, indexPath = self.indexPath,
             capabilities = self.capabilities, stats = counts(), indexWritten = self.indexWritten == true,
             runtimeToken = Deep.runtimeToken,
             elapsedSeconds = os.clock() - start, error = self.indexError or "",
@@ -130,8 +131,11 @@ function Deep.new(base, enabled, control, progress, context)
     function self:saveIndex()
         local ok, err = pcall(function()
             folders(base .. "/scripts")
-            writefile(base .. "/" .. self.indexPath, Http:JSONEncode({version = 1,
-                stats = counts(), capabilities = self.capabilities, scripts = self.entries}))
+            local encoded=Http:JSONEncode({version = 2,stats = counts(),capabilities = self.capabilities,scripts = self.entries})
+            writefile(base .. "/" .. self.indexPath,encoded)
+            if self.capabilities.readfile and self.capabilities.isfile then
+                assert(isfile(base.."/"..self.indexPath)and readfile(base.."/"..self.indexPath)==encoded,"script index readback mismatch")
+            end
         end)
         self.indexWritten = ok
         if ok then self.dirty = false end
@@ -142,7 +146,11 @@ function Deep.new(base, enabled, control, progress, context)
         local id = "s" .. tostring(record.instanceId)
         if self.seen[id] then
             record.scriptId = id
-            self.byId[id].latestObservedPath = textSafe(record.path)
+            local latest = textSafe(record.path)
+            if self.byId[id].latestObservedPath ~= latest then
+                self.byId[id].latestObservedPath = latest
+                self.dirty = true
+            end
             return
         end
         self.seen[id] = true; record.scriptId = id
@@ -158,7 +166,11 @@ function Deep.new(base, enabled, control, progress, context)
         self.entries[#self.entries + 1] = entry
         self.dirty = true
         self.byId[id] = entry
-        if self.enabled then self.queue[#self.queue + 1] = {instance = instance, entry = entry}
+        if self.enabled then
+            if #self.queue >= (context.queueLimit or 8192)then
+                entry.status="inaccessible";entry.error="script work queue overflow";entry.skipped=true
+                if type(context.onOverflow)=="function"then context.onOverflow()end
+            else self.queue[#self.queue+1]={instance=instance,entry=entry}end
         else entry.status = "inaccessible"; entry.error = "reconstructed code not enabled"; entry.skipped = true end
     end
     local function extract(job)
@@ -195,7 +207,9 @@ function Deep.new(base, enabled, control, progress, context)
                         assert(isfile(base .. "/" .. path) and readfile(base .. "/" .. path) == source,
                             "diagnostic readback mismatch")
                     end)
-                    if saved then entry.diagnosticPath = path
+                    if saved then
+                        entry.diagnosticPath = path
+                        if type(context.artifact)=="function"then context.artifact(path,source,"decompiler_diagnostic")end
                     else entry.diagnosticError = textSafe(tostring(why)) end
                 end
             end
@@ -220,34 +234,37 @@ function Deep.new(base, enabled, control, progress, context)
         entry.compiles = syntaxOk; entry.compileError = syntaxOk and "" or textSafe(syntaxError)
         local utf8Ok = pcall(function() assert(utf8.len(source), "invalid UTF-8") end)
         entry.encoding = utf8Ok and "utf-8" or "invalid-utf8-preserved"
-        local relative = "scripts/sources/" .. safeSegment(entry.service) .. "/" .. entry.scriptId .. "_"
-        local nameLimit = math.max(1, math.min(42, 239 - #base - #relative - 6))
-        entry.outputPath = relative .. safeSegment(entry.name, nameLimit) .. ".luau"
-        local header = "-- Reconstructed client pseudocode; original source is unavailable.\n"
-            .. "-- Roblox path: " .. entry.robloxPath:gsub("[\r\n]", " ")
-            .. "\n-- Class: " .. entry.className .. "\n-- DebugId: " .. entry.debugId:gsub("[\r\n]", " ")
-            .. "\n-- ScriptId: " .. entry.scriptId .. "\n\n"
-        local filename, content = base .. "/" .. entry.outputPath, header .. source
-        entry.headerByteLength = #header; entry.fileByteLength = #content
-        entry.fileChecksum, entry.fileChecksumAlgorithm = Deep.checksum(content, nil, budget)
+        local prefix = "scripts/sources/content/" .. entry.checksumAlgorithm .. "-" .. entry.checksum .. "-" .. #source
+        entry.headerByteLength = 0; entry.fileByteLength = #source
+        entry.fileChecksum, entry.fileChecksumAlgorithm = entry.checksum, entry.checksumAlgorithm
         if cancelled() then entry.status = "inaccessible"; entry.error = "cancelled"; entry.skipped = true; return end
         local written, writeError = pcall(function()
-            folders(filename:match("^(.*)/[^/]+$"))
-            -- Resume an interrupted extraction in this capture only, after exact verification.
-            if self.capabilities.isfile and self.capabilities.readfile and isfile(filename)
-                and readfile(filename) == content then entry.skipped = true
+            assert(self.capabilities.isfile and self.capabilities.readfile, "file readback unavailable")
+            folders(base .. "/scripts/sources/content")
+            local collision = 0
+            local filename
+            while true do
+                entry.outputPath = prefix .. (collision > 0 and ("-collision" .. collision) or "") .. ".luau"
+                filename = base .. "/" .. entry.outputPath
+                if not isfile(filename) then break end
+                if readfile(filename) == source then entry.skipped = true; break end
+                collision = collision + 1
+            end
+            entry.contentId = entry.outputPath
+            if entry.skipped then
+                -- Exact byte equality, never checksum equality alone.
             elseif self.capabilities.appendfile then
-                writefile(filename, header)
+                writefile(filename, "")
                 for offset = 1, #source, 65536 do
                     if cancelled() then error("cancelled during write") end
                     appendfile(filename, source:sub(offset, offset + 65535))
                     checkpoint("script_write", not budget)
                 end
-            else writefile(filename, content) end
-            assert(self.capabilities.isfile and self.capabilities.readfile, "file readback unavailable")
+            else writefile(filename, source) end
             assert(isfile(filename), "file missing after write")
-            assert(readfile(filename) == content, "file readback mismatch")
+            assert(readfile(filename) == source, "file readback mismatch")
             entry.verifiedReadback = true
+            if type(context.artifact) == "function" then context.artifact(entry.outputPath, source, "script") end
         end)
         if not written then
             entry.status = cancelled() and "inaccessible" or "failed"
@@ -270,7 +287,9 @@ function Deep.new(base, enabled, control, progress, context)
             end
         end
         local sinceIndex = 0
-        for index, job in ipairs(self.queue) do
+        local jobs = self.queue
+        self.queue = {}
+        for index, job in ipairs(jobs) do
             if cancelled() then
                 job.entry.status = "inaccessible"; job.entry.error = "cancelled"; job.entry.skipped = true
             else
@@ -293,7 +312,6 @@ function Deep.new(base, enabled, control, progress, context)
             if not cancelled() and type(context.pump)=="function" then context.pump()end
             if not cancelled() then checkpoint("script", not budget) end
         end
-        table.clear(self.queue)
         if self.dirty then self:saveIndex() end
     end
     function self:resume(entries, resolve)

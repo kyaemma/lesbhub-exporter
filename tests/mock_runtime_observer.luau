@@ -98,4 +98,16 @@ boundedCallback({}, remote, "Incoming", rejected)
 assert(#bounded.pending == 512 and bounded:summary().pendingOverflowOccurrences == 2)
 assert(bounded:summary().pendingOverflowCountMeaning == "occurrences_not_distinct_pairs")
 bounded:stop()
+local pausedCallback
+env.LesbhubCobaltAdapter = {version=1, subscribe=function(cb) pausedCallback=cb; return function() end end}
+local paused = Runtime.new({}, {now=function() return 0 end,
+    resolve=function() return {instanceId=1,className="RemoteEvent"} end,
+    emit=function() coroutine.yield("emitting"); return 7 end})
+assert(paused:start() == "attached")
+local active = coroutine.create(function() pausedCallback({}, remote, "Incoming", nil) end)
+local resumed, stage = coroutine.resume(active)
+assert(resumed and stage == "emitting" and paused:inFlight() == 1)
+assert(paused:stop() == "detached" and paused:summary().observedCalls == 0)
+assert(coroutine.resume(active) and paused:inFlight() == 0 and paused:summary().observedCalls == 1,
+    "in-flight callback must finish its accounting after stop")
 print("Runtime observer mock OK: state, lifecycle, types, late caller, temporal association")

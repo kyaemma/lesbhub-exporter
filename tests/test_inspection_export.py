@@ -61,11 +61,104 @@ class InspectionExportTests(unittest.TestCase):
         ledger(folder)
         return manifest
 
+    def v09_fixture(self, folder):
+        manifest = self.fixture(folder)
+        (folder / "gui/transitions.jsonl").unlink()
+        (folder / "gui/actions.jsonl").unlink()
+        (folder / "remotes/observations.jsonl").unlink()
+        (folder / "gui/states/state000001.json").write_text(json.dumps({
+            "schemaVersion": 2, "stateId": 1, "upserts": [], "removes": [], "elementCount": 0,
+        }), encoding="utf-8")
+        save(folder, "gui/states/index.json", {"schemaVersion": 2, "states": [
+            {"stateId": 1, "path": "gui/states/state000001.json", "elementCount": 0, "visits": 1}],
+            "transitions": [],
+        })
+        save(folder, "journal/remote-observations/b000001.json", {
+            "version": 1, "stream": "remote-observations", "rows": [
+                {"sequence": 2, "instanceId": 99, "direction": "Outgoing", "signatureId": 1},
+            ],
+        })
+        save(folder, "gui/states/lookup/testdigest/1.json", {
+            "schemaVersion": 2, "digest": "testdigest", "stateId": 1,
+            "path": "gui/states/state000001.json",
+        })
+        streams = {"remote-observations": {"segments": [
+            {"path": "journal/remote-observations/b000001.json", "count": 1,
+             "firstSequence": 2, "lastSequence": 2}], "events": 1}}
+        save(folder, "journal/index.json", {"version": 1, "streams": streams})
+        save(folder, "remotes/signatures.json", {"version": 1, "signatures": [
+            {"signatureId": 1, "argumentCount": 0, "argumentTypes": []},
+        ]})
+        manifest.update(exporterVersion="0.9.0", inspectionVersion=2,
+                        journal={"version": 1, "path": "journal/index.json", "streams": streams},
+                        dedup={"eventsWritten": 1, "occurrences": 1})
+        save(folder, "manifest.json", manifest)
+        report = json.loads((folder / "report.json").read_text(encoding="utf-8"))
+        report["dedup"] = manifest["dedup"]
+        save(folder, "report.json", report)
+        ledger(folder)
+        return manifest
+
     def test_valid_legacy_and_inspection(self):
         with tempfile.TemporaryDirectory() as directory:
             folder = Path(directory)
             self.fixture(folder)
             self.assertEqual(validate_folder(folder), [])
+
+    def test_v09_inspection_two_validates_segments_and_ignores_checkpoint_folder(self):
+        with tempfile.TemporaryDirectory() as directory:
+            folder = Path(directory)
+            self.v09_fixture(folder)
+            checkpoint = folder / "checkpoints/c000001.json"
+            checkpoint.parent.mkdir(parents=True)
+            checkpoint.write_text("{}", encoding="utf-8")
+            self.assertEqual(validate_folder(folder), [])
+
+    def test_v09_malformed_journal_index_fails(self):
+        with tempfile.TemporaryDirectory() as directory:
+            folder = Path(directory)
+            self.v09_fixture(folder)
+            (folder / "journal/index.json").write_text("{", encoding="utf-8")
+            ledger(folder)
+            issues = validate_folder(folder)
+            self.assertTrue(any("journal" in issue for issue in issues), issues)
+
+    def test_v09_unresolved_occurrence_retained_without_fabricated_identity(self):
+        with tempfile.TemporaryDirectory() as directory:
+            folder = Path(directory)
+            manifest = self.v09_fixture(folder)
+            path = folder / "journal/remote-observations/b000001.json"
+            data = json.loads(path.read_text(encoding="utf-8"))
+            row = data["rows"][0]; row.pop("instanceId")
+            row.update(identityStatus="unresolved", reason="deferred_identity_unavailable")
+            save(folder, path.relative_to(folder).as_posix(), data); ledger(folder)
+            self.assertEqual(validate_folder(folder), [])
+            row["instanceId"] = 99
+            save(folder, path.relative_to(folder).as_posix(), data); ledger(folder)
+            self.assertTrue(any("must not invent identity" in issue for issue in validate_folder(folder)))
+
+    def test_v09_unindexed_journal_file_is_not_authorized_by_ledger(self):
+        with tempfile.TemporaryDirectory() as directory:
+            folder = Path(directory)
+            self.v09_fixture(folder)
+            save(folder, "journal/remote-observations/b000002.json", {
+                "version": 1, "stream": "remote-observations", "rows": [],
+            })
+            ledger(folder)
+            issues = validate_folder(folder)
+            self.assertTrue(any("unrecognized data file" in issue for issue in issues), issues)
+
+    def test_v09_unindexed_gui_lookup_file_is_rejected(self):
+        with tempfile.TemporaryDirectory() as directory:
+            folder = Path(directory)
+            self.v09_fixture(folder)
+            save(folder, "gui/states/lookup/not-an-index-entry.json", {
+                "schemaVersion": 2, "digest": "not-an-index-entry", "stateId": 1,
+                "path": "gui/states/state000001.json",
+            })
+            ledger(folder)
+            issues = validate_folder(folder)
+            self.assertTrue(any("invalid GUI lookup path" in issue for issue in issues), issues)
 
     def test_invalid_artifacts(self):
         for mode in ("missing", "corrupt", "unindexed", "unsafe", "duplicate", "algorithm"):

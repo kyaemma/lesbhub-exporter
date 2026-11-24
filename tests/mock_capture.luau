@@ -2,6 +2,8 @@
 -- Runs without Roblox, Potassium, WindUI or a live experience.
 local writes = {}
 local lastEncoded = nil
+local rawWrites,encodedObjects={},{}
+local encodedSerial=0
 local folders = {}
 
 local function instance(name, className, properties, children)
@@ -58,7 +60,10 @@ local storage = instance("ReplicatedStorage", "ReplicatedStorage", nil, {
 local http = {}
 function http:JSONEncode(value)
     lastEncoded = value
-    return "mock encoded payload"
+    encodedSerial=encodedSerial+1
+    local token="mock encoded payload "..encodedSerial
+    encodedObjects[token]=value
+    return token
 end
 local players = {
     LocalPlayer = {
@@ -90,8 +95,15 @@ function isfolder(path) return folders[path] == true end
 function writefile(path, data)
     assert(type(data) == "string")
     writes[path] = lastEncoded
+    rawWrites[path]=data
 end
+function readfile(path)return assert(rawWrites[path],"missing mock file")end
+function isfile(path)return rawWrites[path]~=nil end
+function http:JSONDecode(text)return assert(encodedObjects[text],"unknown mock JSON")end
 task = {wait = function() end}
+local realOs = os
+local simulatedTime
+local os = setmetatable({clock = function() return simulatedTime or realOs.clock() end}, {__index = realOs})
 
 local Exporter = require("../src/engine")
 -- Observe windows and public HTTP metadata are exercised in live tests, not
@@ -620,3 +632,257 @@ players.LocalPlayer.Character = nil
 world._children = savedWorldChildren
 table.clear(syntheticAssociations)
 print("Luau privacy tracking OK: joins, respawns, aliases, local character and cleanup")
+
+-- One hour of simulated wall time, with no injected changes or observations.
+local savedChildren, savedWait = gui._children, task.wait
+local scriptFixture = instance("OneHourScript", "ModuleScript")
+scriptFixture.Parent = gui
+gui._children = {scriptFixture, instance("Idle", "TextLabel", {Text = "unchanged", Visible = true})}
+gui._children[2].Parent = gui
+local decompileCount = 0
+decompile = function() decompileCount = decompileCount + 1; return "" end
+simulatedTime = 100
+task.wait = function(seconds) simulatedTime = simulatedTime + math.max(seconds or 0, 0.01) end
+local hourStart, hourControl, startCount = nil, {}, 0
+local idle, idleError = Exporter.capture({label = "OneHourIdle", targets = {PlayerGui = true},
+    continuous = true, continuousInterval = 3, includeReconstructedCode = true}, function(info)
+    if info.stage == "monitoring_start" then hourStart = simulatedTime; startCount = decompileCount end
+    if info.stage == "monitoring" and hourStart and simulatedTime - hourStart >= 3600 then
+        hourControl.stopRequested = true
+    end
+end, hourControl)
+assert(idle, idleError)
+assert(hourStart and simulatedTime - hourStart >= 3600 and startCount == 1 and decompileCount == startCount)
+assert(idle.manifest.stats.deltaRecords == 0, "unchanged hour produced structural changes")
+local idleRecords = 0
+for filename, chunk in pairs(writes) do
+    if filename:find(idle.folder, 1, true) and type(chunk) == "table" then
+        for _, record in ipairs(chunk.records or {}) do
+            idleRecords = idleRecords + 1
+            assert(not record.operation, "unchanged hour emitted an operation")
+        end
+    end
+end
+assert(idleRecords == 3, "unchanged hour duplicated baseline records")
+assert(gui.DescendantAdded:Count() == 0 and gui.DescendantRemoving:Count() == 0)
+task.wait = savedWait; gui._children = savedChildren; simulatedTime = nil; decompile = nil
+print("Luau simulated idle hour OK: three baseline records, zero changes and no repeat decompile")
+
+-- A failed tree enumeration is not evidence that previously seen children vanished.
+local originalGetChildren = gui.GetChildren
+gui._children = {instance("Retained", "TextLabel", {Text = "before failure"})}
+gui._children[1].Parent = gui
+simulatedTime = 100
+task.wait = function(seconds) simulatedTime = simulatedTime + math.max(seconds or 0, 0.01) end
+local failureControl = {}
+local failedScan, failedScanError = Exporter.capture({label = "IncompleteScan", targets = {PlayerGui = true},
+    continuous = true, continuousInterval = 1}, function(info)
+    if info.stage == "monitoring_start" then gui.GetChildren = function() error("synthetic enumeration failure") end end
+    if info.stage == "monitoring" then failureControl.stopRequested = true end
+end, failureControl)
+assert(failedScan, failedScanError)
+for filename, chunk in pairs(writes) do
+    if filename:find(failedScan.folder, 1, true) and type(chunk) == "table" then
+        for _, record in ipairs(chunk.records or {}) do
+            assert(record.operation ~= "remove", "incomplete scan invented a removal")
+        end
+    end
+end
+gui.GetChildren = originalGetChildren
+
+-- A saturated event queue stops explicitly and retains the already queued records.
+gui._children = {}
+local overflow, overflowError = Exporter.capture({label = "QueueOverflow", targets = {PlayerGui = true},
+    continuous = true, eventQueueLimit = 2}, function(info)
+    if info.stage == "monitoring_start" then
+        for i = 1, 3 do
+            local item = instance("Burst" .. i, "NumberValue", {Value = i})
+            item.Parent = gui
+            gui.DescendantAdded:Fire(item)
+        end
+    end
+end, {})
+assert(overflow, overflowError)
+assert(table.find(overflow.manifest.partialReasons, "event_queue_overflow"), "overflow not reported")
+local retained = 0
+for filename, chunk in pairs(writes) do
+    if filename:find(overflow.folder, 1, true) and type(chunk) == "table" then
+        for _, record in ipairs(chunk.records or {}) do
+            if record.name:match("^Burst") then retained = retained + 1 end
+        end
+    end
+end
+assert(retained == 2, "queue overflow lost already accepted events")
+task.wait = savedWait; gui._children = savedChildren; simulatedTime = nil
+print("Luau incomplete scan and bounded event queue OK")
+
+-- Simulate executor wrappers interned only weakly outside the capture.
+local wrapperCache = setmetatable({}, {__mode = "v"})
+local backing = instance("WeakWrapper", "NumberValue", {Value = 9})
+backing.Parent = gui
+local present = true
+gui.GetChildren = function()
+    if not present then return {} end
+    local wrapper = wrapperCache[1]
+    if not wrapper then
+        wrapper = setmetatable({}, {__index = backing})
+        wrapperCache[1] = wrapper
+    end
+    return {wrapper}
+end
+simulatedTime = 100
+task.wait = function(seconds) simulatedTime = simulatedTime + math.max(seconds or 0, 0.01) end
+local wrapperControl, wrapperCycles = {}, 0
+local anchoredAtStart, anchoredAfterScan, releasedAfterRemove
+local wrapperResult, wrapperError = Exporter.capture({label = "WeakWrapperFixture", targets = {PlayerGui = true},
+    continuous = true, continuousInterval = 1}, function(info)
+    if info.stage == "monitoring_start" then
+        collectgarbage("collect")
+        anchoredAtStart = wrapperCache[1] ~= nil
+    elseif info.stage == "monitoring" then
+        wrapperCycles = wrapperCycles + 1
+        if wrapperCycles == 1 then
+            collectgarbage("collect")
+            anchoredAfterScan = wrapperCache[1] ~= nil
+            present = false
+        elseif wrapperCycles == 2 then
+            collectgarbage("collect")
+            releasedAfterRemove = wrapperCache[1] == nil
+            wrapperControl.stopRequested = true
+        end
+    end
+end, wrapperControl)
+assert(wrapperResult, wrapperError)
+assert(anchoredAtStart and anchoredAfterScan, "live wrapper was not anchored")
+assert(releasedAfterRemove, "removed wrapper retained after tombstone")
+local wrapperIds, wrapperAdds, wrapperRemoves = {}, 0, 0
+for filename, chunk in pairs(writes) do
+    if filename:find(wrapperResult.folder, 1, true) and type(chunk) == "table" then
+        for _, record in ipairs(chunk.records or {}) do
+            if record.name == "WeakWrapper" then
+                wrapperIds[record.instanceId] = true
+                if record.operation == "add" then wrapperAdds = wrapperAdds + 1 end
+                if record.operation == "remove" then wrapperRemoves = wrapperRemoves + 1 end
+            end
+        end
+    end
+end
+local wrapperIdCount = 0; for _ in pairs(wrapperIds) do wrapperIdCount = wrapperIdCount + 1 end
+assert(wrapperIdCount == 1 and wrapperAdds == 0 and wrapperRemoves == 1,
+    "weak wrapper GC created duplicate identity or structural changes")
+gui.GetChildren = originalGetChildren; task.wait = savedWait; gui._children = savedChildren; simulatedTime = nil
+print("Luau weak-wrapper identity OK: stable while live, released after removal")
+
+-- Structural signal while sidecars are being written must defer publication.
+local realWritefile = writefile
+local checkpointControl, injected, checkpointAtStart = {}, false, false
+local checkpointChild = instance("CheckpointArrival", "TextLabel", {Text = "new"})
+checkpointChild.Parent = gui
+gui._children = {}
+simulatedTime = 100
+task.wait = function(seconds) simulatedTime = simulatedTime + math.max(seconds or 0, 0.01) end
+writefile = function(path, data)
+    if not injected and path:find("checkpointarrival", 1, true) and path:match("/client%.json$") then
+        injected = true
+        gui._children = {checkpointChild}
+        gui.DescendantAdded:Fire(checkpointChild)
+    end
+    return realWritefile(path, data)
+end
+local reentrantResult, reentrantError = Exporter.capture({label = "CheckpointArrival", targets = {PlayerGui = true},
+    continuous = true, continuousInterval = 3}, function(info)
+    if info.stage == "monitoring_start" then
+        for path in pairs(rawWrites) do
+            if path:find("checkpointarrival", 1, true) and path:match("/checkpoints/c%d+%.json$") then
+                checkpointAtStart = true
+            end
+        end
+    elseif info.stage == "monitoring" and simulatedTime >= 165 then checkpointControl.stopRequested = true end
+end, checkpointControl)
+writefile = realWritefile
+assert(reentrantResult, reentrantError)
+assert(injected and not checkpointAtStart, "published a checkpoint with a structural event still queued")
+local checkpointPath = reentrantResult.folder .. "/checkpoints/c000001.json"
+local checkpointPayload = http:JSONDecode(assert(rawWrites[checkpointPath], "checkpoint was not retried"))
+assert(checkpointPayload.pending.structuralQueued == 0)
+local savedGui
+for _, snapshot in ipairs(checkpointPayload.snapshots) do
+    if snapshot.path == "gui/index.json" then savedGui = http:JSONDecode(rawWrites[reentrantResult.folder .. "/" .. snapshot.snapshotPath]) end
+end
+local recordedArrival, arrivalSequence = false, nil
+for _, item in ipairs(savedGui and savedGui.elements or {}) do
+    if item.name == "CheckpointArrival" then
+        recordedArrival = true
+        arrivalSequence = item.sequence
+        assert(item.sequence <= checkpointPayload.lastSequence)
+    end
+end
+assert(recordedArrival, "retry omitted the admitted structural change")
+local arrivalDurable = false
+for _, artifact in ipairs(checkpointPayload.artifacts) do
+    local raw = rawWrites[reentrantResult.folder .. "/" .. artifact.path]
+    local chunk = raw and encodedObjects[raw]
+    if type(chunk) == "table" then
+        for _, record in ipairs(chunk.records or {}) do
+            if record.name == "CheckpointArrival" and record.sequence == arrivalSequence then arrivalDurable = true end
+        end
+    end
+end
+assert(arrivalDurable, "checkpoint sidecar included a structural event missing from durable chunks")
+
+-- A failed sidecar write must not publish a checkpoint until a successful retry.
+local failOnce, checkpointAfterFailure, failureRetry = true, false, {}
+gui._children = {}
+simulatedTime = 100
+writefile = function(path, data)
+    if failOnce and path:find("checkpointfail", 1, true) and path:match("/client%.json$") then
+        failOnce = false
+        error("synthetic checkpoint sidecar failure")
+    end
+    return realWritefile(path, data)
+end
+local failedCheckpointResult, failedCheckpointError = Exporter.capture({label = "CheckpointFail", targets = {PlayerGui = true},
+    continuous = true, continuousInterval = 3}, function(info)
+    if info.stage == "monitoring_start" then
+        for path in pairs(rawWrites) do
+            if path:find("checkpointfail", 1, true) and path:match("/checkpoints/c%d+%.json$") then
+                checkpointAfterFailure = true
+            end
+        end
+    elseif info.stage == "monitoring" and simulatedTime >= 165 then failureRetry.stopRequested = true end
+end, failureRetry)
+writefile = realWritefile
+assert(failedCheckpointResult, failedCheckpointError)
+assert(not failOnce and not checkpointAfterFailure, "checkpoint published despite sidecar failure")
+assert(rawWrites[failedCheckpointResult.folder .. "/checkpoints/c000001.json"], "failed checkpoint not retried")
+
+local failJournal, journalFailureSeen, checkpointWithFailedFlush, flushRetry = true, false, false, {}
+local flushButton = instance("FlushButton", "TextButton", {Text = "Run"})
+flushButton.Parent = gui; flushButton.Activated = eventSignal(); gui._children = {flushButton}
+simulatedTime = 100
+writefile = function(path, data)
+    if failJournal and path:find("checkpointflush", 1, true) and path:find("/journal/gui-actions/", 1, true) then
+        journalFailureSeen = true
+        error("synthetic journal write failure")
+    end
+    return realWritefile(path, data)
+end
+local flushedResult, flushedError = Exporter.capture({label = "CheckpointFlush", targets = {PlayerGui = true},
+    continuous = true, continuousInterval = 3}, function(info)
+    if info.stage == "service_done" and not journalFailureSeen then
+        flushButton.Activated:Fire()
+    elseif info.stage == "monitoring_start" then
+        for path in pairs(rawWrites) do
+            if path:find("checkpointflush", 1, true) and path:match("/checkpoints/c%d+%.json$") then
+                checkpointWithFailedFlush = true
+            end
+        end
+        failJournal = false
+    elseif info.stage == "monitoring" and simulatedTime >= 110 then flushRetry.stopRequested = true end
+end, flushRetry)
+writefile = realWritefile
+assert(flushedResult, flushedError)
+assert(journalFailureSeen and not checkpointWithFailedFlush, "checkpoint published after journal flush failure")
+assert(rawWrites[flushedResult.folder .. "/checkpoints/c000001.json"], "failed journal flush was not retried promptly")
+task.wait = savedWait; gui._children = savedChildren; simulatedTime = nil
+print("Luau checkpoint cut OK: reentrant event, failed sidecar and failed journal deferred")

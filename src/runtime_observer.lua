@@ -16,7 +16,9 @@ function Runtime.new(cfg, context)
         reason = "not_started", cleanup = nil, started = false,
         startedAt = context.startedAt or context.now(), window = math.max(0, tonumber(cfg.correlationWindowSeconds) or 2),
         calls = 0, skipped = 0, counts = {}, recentGui = {}, recentRemote = {},
-        links = {}, droppedRelations = 0, pending = {}, pendingByOrigin = {}, droppedPending = 0}, Observer)
+        links = {}, temporalRelations=0, droppedRelations = 0, pending = {}, pendingByOrigin = {}, droppedPending = 0,
+        inFlightCalls = 0, raw = {}, rawHead = 1, rawTail = 0,
+        rawPeak = 0, rawLost = 0, rawBusy = false, unresolvedCalls = 0}, Observer)
 end
 
 local function elapsed(self)
@@ -32,12 +34,16 @@ local function correlate(self, gui, remote)
     if not gui.sequence or not remote.sequence then return end
     local delta = remote.elapsedSeconds - gui.elapsedSeconds
     if math.abs(delta) > self.window then return end
-    if #self.links >= MAX_RELATIONS then self.droppedRelations = self.droppedRelations + 1; return end
-    self.links[#self.links + 1] = {kind = "temporal_association", causal = false,
+    local row={kind = "temporal_association", causal = false,
         guiSequence = gui.sequence, remoteSequence = remote.sequence,
         guiInstanceId = gui.instanceId, remoteInstanceId = remote.instanceId,
-        guiEventType = gui.eventType, toStateId = gui.toStateId,
-        deltaSeconds = delta}
+        guiEventType = gui.eventType, toStateId = gui.toStateId, deltaSeconds = delta}
+    if type(self.context.emitRelation)=="function"then
+        local ok,sequence=pcall(self.context.emitRelation,row)
+        if ok and sequence then self.temporalRelations=self.temporalRelations+1
+        else self.droppedRelations=self.droppedRelations+1 end
+    elseif #self.links<MAX_RELATIONS then self.links[#self.links+1]=row;self.temporalRelations=self.temporalRelations+1
+    else self.droppedRelations=self.droppedRelations+1 end
 end
 
 function Observer:noteGuiAction(event)
@@ -53,10 +59,16 @@ function Observer:noteGuiAction(event)
     addRecent(self.recentGui, row)
 end
 
-function Observer:observe(metadata, remote, direction, origin)
-    if self.state ~= "attached" or (direction ~= "Incoming" and direction ~= "Outgoing") then return end
+function Observer:_observe(metadata, remote, direction, origin, admitted)
+    if (not admitted and self.state ~= "attached") or (direction ~= "Incoming" and direction ~= "Outgoing") then return false end
     local ok, identity = pcall(self.context.resolve, remote)
-    if not ok or type(identity) ~= "table" or not identity.instanceId then self.skipped = self.skipped + 1; return end
+    local pathEvidence = "deferred_resolution"
+    if not ok or type(identity) ~= "table" or not identity.instanceId then
+        identity = admitted and admitted.cached or nil
+        pathEvidence = "last_structural_observation"
+    end
+    local resolved = type(identity) == "table" and identity.instanceId ~= nil
+    if not resolved and not admitted then self.skipped = self.skipped + 1; return false end
     metadata = type(metadata) == "table" and metadata or {}
     local count = tonumber(metadata.argumentCount) or 0
     if count ~= count or count < 0 or count == math.huge then count = 0 end
@@ -71,19 +83,37 @@ function Observer:observe(metadata, remote, direction, origin)
     if count > 32 then types[#types + 1] = "..." end
     local invokeKind = metadata.invokeKind
     if invokeKind ~= "Request" and invokeKind ~= "Callback" then invokeKind = nil end
-    local caller
-    if origin ~= nil then
+    local caller, callerPathEvidence
+    if origin ~= nil and resolved then
         local callerOk, value = pcall(self.context.resolve, origin)
-        if callerOk and type(value) == "table" then caller = value end
+        if callerOk and type(value) == "table" and value.instanceId then
+            caller = value; callerPathEvidence = "deferred_resolution"
+        elseif admitted and admitted.cachedCaller then
+            caller = admitted.cachedCaller; callerPathEvidence = "last_structural_observation"
+        end
     end
-    local row = {instanceId = identity.instanceId, robloxPath = identity.robloxPath,
-        className = identity.className, direction = direction, argumentTypes = types,
+    local row = {instanceId = resolved and identity.instanceId or nil, robloxPath = resolved and identity.robloxPath or nil,
+        className = resolved and identity.className or nil, direction = direction, argumentTypes = types,
         argumentCount = count, invokeKind = invokeKind, scriptId = caller and caller.scriptId or nil,
         callerInstanceId = caller and caller.instanceId or nil,
-        evidence = "cobalt_observed", elapsedSeconds = elapsed(self)}
+        evidence = "cobalt_observed", elapsedSeconds = admitted and admitted.elapsedSeconds or elapsed(self),
+        sequence = admitted and admitted.sequence or nil, observedAtUtc = admitted and admitted.observedAtUtc or nil}
+    if admitted then
+        row.identityStatus = resolved and "resolved" or "unresolved"
+        row.reason = not resolved and "deferred_identity_unavailable" or nil
+        row.pathEvidence = resolved and pathEvidence or nil
+        row.scopeBasis = resolved and (pathEvidence == "deferred_resolution" and "resolved_at_drain" or "last_known") or nil
+        row.callerPathEvidence = caller and callerPathEvidence or nil
+    end
+    if admitted and type(self.context.canEmit) == "function" and not self.context.canEmit() then return false end
     local emitted, sequence = pcall(self.context.emit, row)
-    if not emitted then self.skipped = self.skipped + 1; return end
+    if not emitted or not sequence then
+        if admitted then self.rawProcessingFailed = true end
+        if admitted and type(self.context.onRawProcessError) == "function" then pcall(self.context.onRawProcessError) end
+        return false
+    end
     self.calls = self.calls + 1
+    if not resolved then self.unresolvedCalls = self.unresolvedCalls + 1; return true end
     local stats = self.counts[identity.instanceId]
     if not stats then
         stats = {instanceId = identity.instanceId, robloxPath = identity.robloxPath,
@@ -115,7 +145,91 @@ function Observer:observe(metadata, remote, direction, origin)
     local observed = {sequence = sequence or row.sequence, elapsedSeconds = row.elapsedSeconds, instanceId = identity.instanceId}
     for _, gui in ipairs(self.recentGui) do correlate(self, gui, observed) end
     addRecent(self.recentRemote, observed)
+    return true
 end
+
+function Observer:_admitRaw(metadata, remote, direction, origin)
+        if direction ~= "Incoming" and direction ~= "Outgoing" then return end
+        local size = self.rawTail - self.rawHead + 1
+        if size >= (self.cfg.rawQueueLimit or 16384) then
+            self.rawLost = self.rawLost + 1
+            if type(self.context.onRawOverflow) == "function" then pcall(self.context.onRawOverflow) end
+            return
+        end
+        metadata = type(metadata) == "table" and metadata or {}
+        local count = tonumber(rawget(metadata, "argumentCount")) or 0
+        if count ~= count or count < 0 or count == math.huge then count = 0 end
+        count = math.floor(count)
+        local originalTypes, types = rawget(metadata, "argumentTypes"), {}
+        if type(originalTypes) == "table" then
+            for i = 1, math.min(count, 32) do
+                local kind = rawget(originalTypes, i)
+                types[i] = type(kind) == "string" and TYPES[kind] and kind or "unknown"
+            end
+        end
+        local invokeKind = rawget(metadata, "invokeKind")
+        if invokeKind ~= "Request" and invokeKind ~= "Callback" then invokeKind = nil end
+        local sequence, observedAtUtc, elapsedSeconds = self.context.reserve()
+        local cached = type(self.context.peekRemote) == "function" and self.context.peekRemote(remote) or nil
+        local cachedCaller = origin ~= nil and type(self.context.peekCaller) == "function" and self.context.peekCaller(origin) or nil
+        self.rawTail = self.rawTail + 1
+        self.raw[self.rawTail] = {metadata={argumentCount=count,argumentTypes=types,invokeKind=invokeKind},
+            remote=remote, origin=origin, direction=direction, sequence=sequence,
+            observedAtUtc=observedAtUtc, elapsedSeconds=elapsedSeconds, cached=cached, cachedCaller=cachedCaller}
+        self.rawPeak = math.max(self.rawPeak, size + 1)
+end
+
+function Observer:observe(...)
+    if self.state ~= "attached" then return end
+    if self.cfg.deferRaw then
+        local ok = pcall(self._admitRaw, self, ...)
+        if not ok then
+            self.rawLost = self.rawLost + 1
+            if type(self.context.onRawError) == "function" then pcall(self.context.onRawError) end
+        end
+        return
+    end
+    self.inFlightCalls = self.inFlightCalls + 1
+    local ok, result = pcall(self._observe, self, ...)
+    self.inFlightCalls = self.inFlightCalls - 1
+    if not ok then self.skipped = self.skipped + 1; return end
+    return result
+end
+
+function Observer:inFlight() return self.inFlightCalls end
+
+function Observer:drainRaw(maximum)
+    if self.rawBusy or self.rawProcessingFailed then return false end
+    self.rawBusy = true
+    local limit = math.min(self.rawTail, self.rawHead + (maximum or math.huge) - 1)
+    while self.rawHead <= limit do
+        local item = self.raw[self.rawHead]
+        local ok, emitted = pcall(self._observe, self, item.metadata, item.remote, item.direction, item.origin, item)
+        if not ok or not emitted then
+            if not ok then
+                self.rawProcessingFailed = true
+                if type(self.context.onRawProcessError) == "function" then pcall(self.context.onRawProcessError) end
+            end
+            self.rawBusy = false; return false
+        end
+        self.raw[self.rawHead] = nil
+        self.rawHead = self.rawHead + 1
+    end
+    if self.rawHead > self.rawTail then
+        self.raw = {}; self.rawHead = 1; self.rawTail = 0
+    elseif self.rawHead > 8192 then
+        -- Sustained traffic may never empty the FIFO; compact only on the pump,
+        -- keeping storage bounded by the queue limit rather than session age.
+        local compact, count = {}, 0
+        for index = self.rawHead, self.rawTail do
+            count = count + 1; compact[count] = self.raw[index]
+        end
+        self.raw = compact; self.rawHead = 1; self.rawTail = count
+    end
+    self.rawBusy = false
+    return true
+end
+function Observer:rawPending() return self.rawTail - self.rawHead + 1 end
 
 function Observer:start()
     if self.started then return self.state end
@@ -157,13 +271,15 @@ function Observer:stop()
 end
 
 function Observer:summary()
-    return {state = self.state, reason = self.reason, observedCalls = self.calls,
-        skipped = self.skipped, droppedRelations = self.droppedRelations,
+    return {state = self.state, reason = self.reason, observedCalls = self.calls, temporalRelations=self.temporalRelations,
+        skipped = self.skipped, unresolvedCalls = self.unresolvedCalls, pendingRawObservations = self:rawPending(),
+        lostRawObservations = self.rawLost, rawPeak = self.rawPeak, droppedRelations = self.droppedRelations,
         droppedPendingCallers = self.droppedPending, pendingOverflowOccurrences = self.droppedPending,
         pendingOverflowCountMeaning = "occurrences_not_distinct_pairs", correlationWindowSeconds = self.window}
 end
 
-function Observer:remoteStats()
+function Observer:remoteStats(resolvePending)
+    if resolvePending~=false then
     for _, pending in ipairs(self.pending) do
         local ok, caller = pcall(self.context.resolve, pending.origin)
         local stats = self.counts[pending.remoteId]
@@ -173,6 +289,7 @@ function Observer:remoteStats()
     end
     self.pending = {}
     self.pendingByOrigin = {}
+    end
     local rows = {}
     for _, row in pairs(self.counts) do
         local links = {}

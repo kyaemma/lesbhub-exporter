@@ -59,6 +59,36 @@ assert(entry.lineCount == 3003 and entry.byteLength == #long)
 assert(readfile(base .. "/" .. entry.outputPath):sub(entry.headerByteLength + 1) == long,
     "code was modified or truncated")
 assert(good.entries[1].outputPath ~= good.entries[3].outputPath, "same-name files collide")
+local duplicate, duplicateBase, duplicateObjects = capture({"return 1", "return 1", "return 2"})
+assert(duplicate.entries[1].scriptId ~= duplicate.entries[2].scriptId)
+assert(duplicate.entries[1].outputPath == duplicate.entries[2].outputPath)
+assert(readfile(duplicateBase .. "/" .. duplicate.entries[1].outputPath) == "return 1")
+local duplicateStats = duplicate:summary().stats
+assert(duplicateStats.files == 2 and duplicateStats.logicalFiles == 3 and duplicateStats.sharedReferences == 1)
+local previousDecompiles = decompiles
+duplicate:discover(duplicateObjects[1], {instanceId = 1, path = "Renamed/Fixture"}, "ReplicatedStorage")
+duplicate:drain()
+assert(decompiles == previousDecompiles and duplicate.dirty and duplicate.entries[1].latestObservedPath == "Renamed/Fixture")
+duplicate:saveIndex()
+crypt = {hash = function() return string.rep("a", 64) end}
+local collision = capture({"return 1", "return 2", "return 1"})
+assert(collision.entries[1].outputPath ~= collision.entries[2].outputPath
+    and collision.entries[1].outputPath == collision.entries[3].outputPath, "checksum collisions must compare bytes")
+crypt = nil
+local pumped, queued = false, nil
+queued = Deep.new("LesbhubExporter/mock/pumped", true, {}, nil, {pump = function()
+    if not pumped then
+        pumped = true
+        queued:discover({code = "return 2", GetDebugId = function() return "b" end},
+            {instanceId = 2, name = "b", className = "ModuleScript", path = "Root/b", parentPath = "Root"}, "Root")
+    end
+end})
+queued:discover({code = "return 1", GetDebugId = function() return "a" end},
+    {instanceId = 1, name = "a", className = "ModuleScript", path = "Root/a", parentPath = "Root"}, "Root")
+queued:drain()
+assert(#queued.queue == 1 and queued.entries[2].status == "pending", "drain consumed jobs queued by its pump")
+queued:drain()
+assert(#queued.queue == 0 and queued.entries[2].status == "success")
 assert(not entry.outputPath:find("[<>:]"))
 local attempts = decompiles
 good:resume(good.entries, function(e) return objects[e.instanceId] end)
@@ -70,12 +100,12 @@ assert(errors.entries[2].diagnosticByteLength == 0 and not errors.entries[2].dia
 assert(errors.entries[3].diagnosticByteLength == #"-- comment only")
 assert(errors.entries[4].status == "partial" and errors.entries[4].verifiedReadback)
 assert(errors.entries[5].status == "partial" and errors.entries[5].truncationDetected)
-local commentOnly = capture({"--[[decompilation unavailable\nno code\n]]", "--[=[only a comment]=]"})
+local commentOnly, commentBase = capture({"--[[decompilation unavailable\nno code\n]]", "--[=[only a comment]=]"})
 assert(commentOnly.entries[1].status == "empty" and commentOnly.entries[2].status == "empty",
     "comment-only failure was saved as successful code")
 local diagnostic = commentOnly.entries[1]
 assert(diagnostic.diagnosticPath and diagnostic.diagnosticChecksumAlgorithm == "adler32")
-assert(readfile("LesbhubExporter/mock/run3/" .. diagnostic.diagnosticPath)
+assert(readfile(commentBase .. "/" .. diagnostic.diagnosticPath)
     == "--[[decompilation unavailable\nno code\n]]", "diagnostic bytes changed")
 local originalDecompile = decompile
 decompile = nil

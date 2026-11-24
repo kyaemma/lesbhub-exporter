@@ -45,6 +45,8 @@ function Report.build(manifest, extras)
     local skippedCalls = tonumber(observer and observer.skipped) or 0
     local droppedRelations = tonumber(observer and observer.droppedRelations) or 0
     local droppedCallers = tonumber(observer and observer.droppedPendingCallers) or 0
+    local unresolvedCalls = tonumber(observer and observer.unresolvedCalls) or 0
+    local lostRawObservations = tonumber(observer and observer.lostRawObservations) or 0
     local relationCounts = manifest.relations and type(manifest.relations) == "table"
         and copy(manifest.relations.counts or manifest.relations) or {}
     if type(relationCounts) ~= "table" then relationCounts = {} end
@@ -54,12 +56,16 @@ function Report.build(manifest, extras)
     local limits = type(extras.limitations) == "table" and extras.limitations or {}
     local metadataPartial = (tonumber(stats.errors) or 0) > 0
         or (type(manifest.errors) == "table" and #manifest.errors > 0)
+    local journalPartial = (tonumber(diagnostics.writeErrors) or 0) > 0
     for _, reason in ipairs(type(manifest.partialReasons) == "table" and manifest.partialReasons or {}) do
         if type(reason) == "string" and (reason:find("record_serialization", 1, true)
             or reason:find("property_serialization", 1, true)
-            or reason:find("read_or_write_errors", 1, true)) then
+            or reason:find("read_or_write_errors", 1, true)
+            or reason == "event_queue_overflow") then
             metadataPartial = true
         end
+        if type(reason) == "string" and (reason:find("journal_", 1, true)
+            or reason == "gui_callback_failed") then journalPartial = true end
     end
 
     local scriptState, scriptReason
@@ -98,6 +104,12 @@ function Report.build(manifest, extras)
     else
         observationState, observationReason = "unavailable", "Observer availability was not recorded."
     end
+    if journalPartial and observationState ~= "disabled" and observationState ~= "unavailable" then
+        observationState, observationReason = "partial", "Journal writes or admission were incomplete; see partial reasons and loss counters."
+    end
+    if (unresolvedCalls > 0 or lostRawObservations > 0) and observationState ~= "disabled" then
+        observationState, observationReason = "partial", "Some remote identities were unresolved or raw admissions were lost; occurrence and loss counters are explicit."
+    end
 
     local layers = {
         metadata = layer(status(manifest.metadata, manifest.services
@@ -112,8 +124,10 @@ function Report.build(manifest, extras)
         reconstructedScripts = layer(scriptState, scriptReason,
             scriptStats, artifacts.reconstructedScripts or {scriptExport.indexPath or "scripts/index.json"},
             {method = "executor decompile", fidelity = "returned reconstructed bytes; original source unavailable"}),
-        gui = layer(status(manifest.guiAnalysis, manifest.guiAnalysis and "partial" or "unavailable"),
-            manifest.guiAnalysis and (manifest.guiAnalysis.reason or "") or "No GUI analysis summary was recorded.",
+        gui = layer(journalPartial and manifest.guiAnalysis and "partial"
+                or status(manifest.guiAnalysis, manifest.guiAnalysis and "partial" or "unavailable"),
+            journalPartial and "GUI occurrence history may be incomplete; see journal errors and loss counters."
+                or (manifest.guiAnalysis and (manifest.guiAnalysis.reason or "") or "No GUI analysis summary was recorded."),
             manifest.guiAnalysis and (manifest.guiAnalysis.counts or manifest.guiAnalysis) or {},
             artifacts.gui or {"gui/index.json"}, {source = "client GUI snapshots"}),
         remoteInventory = layer(status(manifest.remoteInventory, manifest.remoteInventory and "complete" or "unavailable"),
@@ -121,7 +135,8 @@ function Report.build(manifest, extras)
             manifest.remoteInventory and (manifest.remoteInventory.counts or manifest.remoteInventory) or {},
             artifacts.remoteInventory or {"remotes/index.json"}, {source = "static class inventory"}),
         remoteObservations = layer(observationState, observationReason,
-            {events = observedCalls, skipped = skippedCalls, droppedRelations = droppedRelations,
+            {events = observedCalls, skipped = skippedCalls, unresolvedCalls = unresolvedCalls,
+                lostRawObservations = lostRawObservations, droppedRelations = droppedRelations,
                 droppedPendingCallers = droppedCallers}, artifacts.remoteObservations or {},
             {source = "optional passive Cobalt observations", observerState = observerState,
                 observerReason = observer and observer.reason or "", argumentValues = "not recorded"}),
@@ -160,6 +175,8 @@ function Report.build(manifest, extras)
         settings = copy(settings),
         stats = copy(stats),
         scriptExport = copy(scriptExport),
+        dedup = copy(manifest.dedup or manifest.continuous or {}),
+        continuous = copy(manifest.continuous),
         diagnostics = copy(diagnostics),
         partialReasons = copy(manifest.partialReasons or {}),
         errors = copy(manifest.errors or {}),
@@ -198,16 +215,42 @@ end
 
 function Report.markdown(report)
     report = type(report) == "table" and report or {}
+    local continuous = type(report.continuous) == "table" and report.continuous or {}
+    local settings = type(report.settings) == "table" and report.settings or {}
+    local title = (continuous.enabled == true or settings.continuous == true
+        or settings.captureMode == "continuous") and "# Continuous Capture report (v"
+        or "# Full Export report (v"
     local lines = {
-        "# Full Export report (v" .. safe(report.reportVersion) .. ")", "",
+        title .. safe(report.reportVersion) .. ")", "",
         "- Status: " .. safe(report.status),
         "- Exporter: " .. safe(report.exporterVersion),
         "- Captured: " .. safe(report.capturedAtUtc),
         "- Game: " .. safe(type(report.game) == "table" and report.game.label or report.game),
         "- Place ID: " .. safe(type(report.game) == "table" and report.game.placeId),
-        "", "## Layers", "", "| Layer | Status | Reason | Counts | Artifacts | Evidence |",
-        "|---|---|---|---|---|---|",
     }
+    local dedup = type(report.dedup) == "table" and report.dedup or {}
+    if next(dedup) ~= nil then
+        lines[#lines + 1] = ""
+        lines[#lines + 1] = "## Continuous capture"
+        lines[#lines + 1] = ""
+        lines[#lines + 1] = "| Metric | Count |"
+        lines[#lines + 1] = "|---|---:|"
+        for _, key in ipairs({"inspected", "unchangedRecords", "structuralChanges",
+            "uniqueInstances", "scriptSharedReferences", "guiStates", "guiTransitions",
+            "guiStateBytes", "guiFullSnapshotEquivalentBytes",
+            "eventsWritten", "queuedEvents", "queuePeak", "lostEvents", "checkpointWrites",
+            "storedBytes", "occurrences", "queueDepth", "dropped"}) do
+            if dedup[key] ~= nil then
+                lines[#lines + 1] = "| " .. key .. " | " .. display(dedup[key]) .. " |"
+            end
+        end
+    end
+    lines[#lines + 1] = ""
+    lines[#lines + 1] = "## Layers"
+    lines[#lines + 1] = ""
+    lines[#lines + 1] = "| Layer | Status | Reason | Counts | Artifacts | Evidence |"
+    lines[#lines + 1] =
+        "|---|---|---|---|---|---|"
     for _, name in ipairs(LAYER_NAMES) do
         local item = type(report.layers) == "table" and report.layers[name] or {}
         local counts = display(item.counts)
